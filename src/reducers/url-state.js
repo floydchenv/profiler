@@ -91,7 +91,7 @@ const profilesToCompare: Reducer<string[] | null> = (state = null, action) => {
   }
 };
 
-const selectedTab: Reducer<TabSlug> = (state = 'calltree', action) => {
+const selectedTab: Reducer<TabSlug> = (state = 'flame-graph', action) => {
   switch (action.type) {
     case 'CHANGE_SELECTED_TAB':
     case 'SELECT_TRACK':
