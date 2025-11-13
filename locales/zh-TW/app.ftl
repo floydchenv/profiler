@@ -6,12 +6,6 @@
 ### Localization for the App UI of Profiler
 
 
-# Naming convention for l10n IDs: "ComponentName--string-summary".
-# This allows us to minimize the risk of conflicting IDs throughout the app.
-# Please sort alphabetically by (component name), and
-# keep strings in order of appearance.
-
-
 ## The following feature names must be treated as a brand. They cannot be translated.
 
 -firefox-brand-name = Firefox
@@ -44,6 +38,14 @@ AppViewRouter--error-from-localhost-url-safari = 由於 <a>Safari 的特殊限�
     .title = 無法使用 Safari 匯入本機效能檢測檔
 AppViewRouter--route-not-found--home =
     .specialMessage = 無法處理您嘗試開啟的網址。
+
+## Backtrace
+## This is used to display a backtrace (call stack) for a marker or sample.
+
+# Variables:
+#   $function (String) - Name of the function that was inlined.
+Backtrace--inlining-badge = （內聯）
+    .title = 編譯器將 { $function } 內聯到呼叫它的函式中。
 
 ## CallNodeContextMenu
 ## This is used as a context menu for the Call Tree, Flame Graph and Stack Chart
@@ -361,6 +363,16 @@ MarkerTable--duration = 持續時間
 MarkerTable--name = 名稱
 MarkerTable--details = 詳細資訊
 
+## MarkerTooltip
+## This is the component for Marker Tooltip panel.
+
+# This is used as the tooltip for the filter button in marker tooltips.
+# Variables:
+#   $filter (String) - Search string that will be used to filter the markers.
+MarkerTooltip--filter-button-tooltip =
+    .title = 只顯示符合「{ $filter }」的標記
+    .aria-label = 只顯示符合「{ $filter }」的標記
+
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
 
@@ -404,9 +416,10 @@ MenuButtons--index--hide-moreInfo-button = 顯示更少
 #   $physicalCPUs (Number), $logicalCPUs (Number) - Number of Physical and Logical CPU Cores
 MenuButtons--metaInfo--physical-and-logical-cpu =
     { $physicalCPUs ->
-       *[other] { $physicalCPUs } 顆實體核心
-    }、{ $logicalCPUs ->
-       *[other] { $logicalCPUs } 顆邏輯核心
+       *[other]
+            { $logicalCPUs ->
+               *[other] { $physicalCPUs } 顆實體核心、{ $logicalCPUs } 顆邏輯核心
+            }
     }
 # This string is used when we only have the information about the number of
 # physical CPU cores.
@@ -428,6 +441,8 @@ MenuButtons--metaInfo--profiling-started = 紀錄開始於：
 MenuButtons--metaInfo--profiling-session = 紀錄長度：
 MenuButtons--metaInfo--main-process-started = 主處理程序開始：
 MenuButtons--metaInfo--main-process-ended = 主要處理程序結束於：
+MenuButtons--metaInfo--file-name = 檔案名稱：
+MenuButtons--metaInfo--file-size = 檔案大小：
 MenuButtons--metaInfo--interval = 間隔：
 MenuButtons--metaInfo--buffer-capacity = 緩衝區容量：
 MenuButtons--metaInfo--buffer-duration = 緩衝區長度：
@@ -640,8 +655,8 @@ ServiceWorkerManager--hide-notice-button =
 
 StackSettings--implementation-all-frames = 所有堆疊框
     .title = 不過濾堆疊框
-StackSettings--implementation-javascript2 = JavaScript
-    .title = 僅顯示與執行 JavaScript 有關的堆疊框
+StackSettings--implementation-script = 指令碼
+    .title = 僅顯示指令碼執行相關的堆疊框
 StackSettings--implementation-native2 = 原生
     .title = 僅顯示原生程式碼相關的堆疊框
 # This label is displayed in the marker chart and marker table panels only.
@@ -662,6 +677,7 @@ StackSettings--call-tree-strategy-native-deallocations-sites = 取消分配的�
 StackSettings--invert-call-stack = 反轉呼叫堆疊
     .title = 依照呼叫節點當中花費的時間排序，並忽略其 children。
 StackSettings--show-user-timing = 顯示使用者計時
+StackSettings--use-stack-chart-same-widths = 將每個堆疊以相同寬度顯示
 StackSettings--panel-search =
     .label = 過濾堆疊：
     .title = 只顯示包含符合的子字串的函數名稱的相關堆疊
@@ -1031,6 +1047,13 @@ SourceView--not-in-archive-error-when-obtaining-source = 下載自 { $url } 的�
 #   $url (String) - The URL from which the "archive" file was downloaded.
 #   $parsingErrorMessage (String) - The raw internal error message during parsing, not localized
 SourceView--archive-parsing-error-when-obtaining-source = 無法剖析下載自 { $url } 的封存檔：{ $parsingErrorMessage }
+# Displayed below SourceView--cannot-obtain-source, if a JS file could not be found in
+# the browser.
+# Variables:
+#   $url (String) - The URL of the JS source file.
+#   $sourceUuid (number) - The UUID of the JS source file.
+#   $errorMessage (String) - The raw internal error message, not localized
+SourceView--not-in-browser-error-when-obtaining-js-source = 瀏覽器無法取得 sourceUuid 為 { $sourceUuid }，位於 { $url } 的原始碼檔案：{ $errorMessage }。
 
 ## Toggle buttons in the top right corner of the bottom box
 

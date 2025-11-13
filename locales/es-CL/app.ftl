@@ -6,12 +6,6 @@
 ### Localization for the App UI of Profiler
 
 
-# Naming convention for l10n IDs: "ComponentName--string-summary".
-# This allows us to minimize the risk of conflicting IDs throughout the app.
-# Please sort alphabetically by (component name), and
-# keep strings in order of appearance.
-
-
 ## The following feature names must be treated as a brand. They cannot be translated.
 
 -firefox-brand-name = Firefox
@@ -44,6 +38,14 @@ AppViewRouter--error-from-localhost-url-safari = Debido a una <a>limitación esp
     .title = Safari no puede importar perfiles locales
 AppViewRouter--route-not-found--home =
     .specialMessage = La URL a la que intentaste acceder no fue reconocida.
+
+## Backtrace
+## This is used to display a backtrace (call stack) for a marker or sample.
+
+# Variables:
+#   $function (String) - Name of the function that was inlined.
+Backtrace--inlining-badge = (incorporadas)
+    .title = { $function } fue incorporada en la función que lo llamó por el compilador.
 
 ## CallNodeContextMenu
 ## This is used as a context menu for the Call Tree, Flame Graph and Stack Chart
@@ -380,6 +382,16 @@ MarkerTable--duration = Duración
 MarkerTable--name = Nombre
 MarkerTable--details = Detalles
 
+## MarkerTooltip
+## This is the component for Marker Tooltip panel.
+
+# This is used as the tooltip for the filter button in marker tooltips.
+# Variables:
+#   $filter (String) - Search string that will be used to filter the markers.
+MarkerTooltip--filter-button-tooltip =
+    .title = Mostrar solo marcadores que coincidan con: “{ $filter }”
+    .aria-label = Mostrar solo marcadores que coincidan con: “{ $filter }”
+
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
 
@@ -423,11 +435,16 @@ MenuButtons--index--hide-moreInfo-button = Mostrar menos
 #   $physicalCPUs (Number), $logicalCPUs (Number) - Number of Physical and Logical CPU Cores
 MenuButtons--metaInfo--physical-and-logical-cpu =
     { $physicalCPUs ->
-        [one] { $physicalCPUs } núcleo físico
-       *[other] { $physicalCPUs } núcleos físicos
-    },{ $logicalCPUs ->
-        [one] { $logicalCPUs } núcleo lógico
-       *[other] { $logicalCPUs } núcleos lógicos
+        [one]
+            { $logicalCPUs ->
+                [one] { $physicalCPUs } núcleo físico,{ $logicalCPUs } núcleo lógico
+               *[other] { $physicalCPUs } núcleo físico,{ $logicalCPUs } núcleos lógicos
+            }
+       *[other]
+            { $logicalCPUs ->
+                [one] { $physicalCPUs } núcleos físicos,{ $logicalCPUs } núcleo lógico
+               *[other] { $physicalCPUs } núcleos físicos,{ $logicalCPUs } núcleos lógicos
+            }
     }
 # This string is used when we only have the information about the number of
 # physical CPU cores.
@@ -661,8 +678,8 @@ ServiceWorkerManager--hide-notice-button =
 
 StackSettings--implementation-all-frames = Todos los cuadros
     .title = No filtrar las pilas de cuadros
-StackSettings--implementation-javascript2 = JavaScript
-    .title = Mostrar solo las pilas de cuadros relacionadas a la ejecución de JavaScript
+StackSettings--implementation-script = Script
+    .title = Mostrar solo los cuadros apilados relacionados a la ejecución del script
 StackSettings--implementation-native2 = Nativo
     .title = Mostrar solo las pilas de cuadros para el código nativo
 # This label is displayed in the marker chart and marker table panels only.
@@ -683,6 +700,7 @@ StackSettings--call-tree-strategy-native-deallocations-sites = Sitios de desasig
 StackSettings--invert-call-stack = Invertir llamada de pila
     .title = Ordenar por el tiempo ocupado en un nodo de llamada, ignorando sus hijos.
 StackSettings--show-user-timing = Mostrar usando tiempos
+StackSettings--use-stack-chart-same-widths = Utilizar el mismo ancho para cada pila
 StackSettings--panel-search =
     .label = Filtrar pilas:
     .title = Solo muestra las pilas que contienen una función cuyo nombre coincida con esta subcadena
@@ -1052,6 +1070,13 @@ SourceView--not-in-archive-error-when-obtaining-source = El documento { $pathInA
 #   $url (String) - The URL from which the "archive" file was downloaded.
 #   $parsingErrorMessage (String) - The raw internal error message during parsing, not localized
 SourceView--archive-parsing-error-when-obtaining-source = El archivo de { $url } no pudo ser analizado: { $parsingErrorMessage }
+# Displayed below SourceView--cannot-obtain-source, if a JS file could not be found in
+# the browser.
+# Variables:
+#   $url (String) - The URL of the JS source file.
+#   $sourceUuid (number) - The UUID of the JS source file.
+#   $errorMessage (String) - The raw internal error message, not localized
+SourceView--not-in-browser-error-when-obtaining-js-source = El navegador no pudo obtener el archivo fuente de { $url } con sourceUuid { $sourceUuid }: { $errorMessage }.
 
 ## Toggle buttons in the top right corner of the bottom box
 

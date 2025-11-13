@@ -6,12 +6,6 @@
 ### Localization for the App UI of Profiler
 
 
-# Naming convention for l10n IDs: "ComponentName--string-summary".
-# This allows us to minimize the risk of conflicting IDs throughout the app.
-# Please sort alphabetically by (component name), and
-# keep strings in order of appearance.
-
-
 ## The following feature names must be treated as a brand. They cannot be translated.
 
 -firefox-brand-name = Firefox
@@ -44,6 +38,14 @@ AppViewRouter--error-from-localhost-url-safari = A causa di una <a>limitazione s
     .title = Impossibile importare profili locali in Safari
 AppViewRouter--route-not-found--home =
     .specialMessage = L’URL che hai cercato di raggiungere non è stato riconosciuto.
+
+## Backtrace
+## This is used to display a backtrace (call stack) for a marker or sample.
+
+# Variables:
+#   $function (String) - Name of the function that was inlined.
+Backtrace--inlining-badge = (incorporata)
+    .title = { $function } è stata incorporata nel chiamante dal compilatore.
 
 ## CallNodeContextMenu
 ## This is used as a context menu for the Call Tree, Flame Graph and Stack Chart
@@ -365,6 +367,16 @@ MarkerTable--duration = Durata
 MarkerTable--name = Nome
 MarkerTable--details = Dettagli
 
+## MarkerTooltip
+## This is the component for Marker Tooltip panel.
+
+# This is used as the tooltip for the filter button in marker tooltips.
+# Variables:
+#   $filter (String) - Search string that will be used to filter the markers.
+MarkerTooltip--filter-button-tooltip =
+    .title = Mostra solo i marker corrispondenti a: “{ $filter }”
+    .aria-label = Mostra solo i marker corrispondenti a: “{ $filter }”
+
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
 
@@ -408,11 +420,16 @@ MenuButtons--index--hide-moreInfo-button = Nascondi dettagli
 #   $physicalCPUs (Number), $logicalCPUs (Number) - Number of Physical and Logical CPU Cores
 MenuButtons--metaInfo--physical-and-logical-cpu =
     { $physicalCPUs ->
-        [one] { $physicalCPUs } core fisico
-       *[other] { $physicalCPUs } core fisici
-    }, { $logicalCPUs ->
-        [one] { $logicalCPUs } core logico
-       *[other] { $logicalCPUs } core logici
+        [one]
+            { $logicalCPUs ->
+                [one] { $physicalCPUs } core fisico, { $logicalCPUs } core logico
+               *[other] { $physicalCPUs } core fisico, { $logicalCPUs } core logici
+            }
+       *[other]
+            { $logicalCPUs ->
+                [one] { $physicalCPUs } core fisici, { $logicalCPUs } core logico
+               *[other] { $physicalCPUs } core fisici, { $logicalCPUs } core logici
+            }
     }
 # This string is used when we only have the information about the number of
 # physical CPU cores.
@@ -436,6 +453,8 @@ MenuButtons--metaInfo--profiling-started = Registrazione avviata:
 MenuButtons--metaInfo--profiling-session = Lunghezza registrazione:
 MenuButtons--metaInfo--main-process-started = Processo principale avviato:
 MenuButtons--metaInfo--main-process-ended = Processo principale completato:
+MenuButtons--metaInfo--file-name = Nome file:
+MenuButtons--metaInfo--file-size = Dimensione file:
 MenuButtons--metaInfo--interval = Intervallo:
 MenuButtons--metaInfo--buffer-capacity = Capacità buffer:
 MenuButtons--metaInfo--buffer-duration = Durata buffer:
@@ -646,8 +665,8 @@ ServiceWorkerManager--hide-notice-button =
 
 StackSettings--implementation-all-frames = Tutti i frame
     .title = Non filtrare gli stack frame
-StackSettings--implementation-javascript2 = JavaScript
-    .title = Mostra solo gli stack frame relativi all’esecuzione di JavaScript
+StackSettings--implementation-script = Script
+    .title = Mostra solo gli stack frame relativi all’esecuzione di script
 StackSettings--implementation-native2 = Nativo
     .title = Mostra solo gli stack frame per il codice nativo
 # This label is displayed in the marker chart and marker table panels only.
@@ -668,6 +687,7 @@ StackSettings--call-tree-strategy-native-deallocations-sites = Deallocazione sit
 StackSettings--invert-call-stack = Inverti stack di chiamata
     .title = Ordina in base al tempo trascorso in un nodo di chiamata, ignorando i nodi figlio.
 StackSettings--show-user-timing = Mostra tempo utente
+StackSettings--use-stack-chart-same-widths = Utilizza la stessa larghezza per ogni stack
 StackSettings--panel-search =
     .label = Filtra stack:
     .title = Mostra solo stack che contengono una funzione il cui nome corrisponde a questa sottostringa
@@ -1037,6 +1057,13 @@ SourceView--not-in-archive-error-when-obtaining-source = Il file { $pathInArchiv
 #   $url (String) - The URL from which the "archive" file was downloaded.
 #   $parsingErrorMessage (String) - The raw internal error message during parsing, not localized
 SourceView--archive-parsing-error-when-obtaining-source = Impossibile analizzare l’archivio in { $url }: { $parsingErrorMessage }
+# Displayed below SourceView--cannot-obtain-source, if a JS file could not be found in
+# the browser.
+# Variables:
+#   $url (String) - The URL of the JS source file.
+#   $sourceUuid (number) - The UUID of the JS source file.
+#   $errorMessage (String) - The raw internal error message, not localized
+SourceView--not-in-browser-error-when-obtaining-js-source = Il browser non è riuscito a ottenere il file sorgente per { $url } con sourceUuid { $sourceUuid }: { $errorMessage }.
 
 ## Toggle buttons in the top right corner of the bottom box
 

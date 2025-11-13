@@ -1,4 +1,3 @@
-// @noflow
 const path = require('path');
 const webpack = require('webpack');
 const fs = require('fs');
@@ -7,11 +6,6 @@ const { GenerateSW } = require('workbox-webpack-plugin');
 const CopyWebpackPlugin = require('copy-webpack-plugin');
 const CircularDependencyPlugin = require('circular-dependency-plugin');
 const includes = [path.join(__dirname, 'src'), path.join(__dirname, 'res')];
-
-const es6modules = ['pretty-bytes'];
-const es6modulePaths = es6modules.map((module) => {
-  return path.join(__dirname, 'node_modules', module);
-});
 
 // If L10N env variable is set, we read all the locale directories and use
 // whatever we have there. This is done to make the l10n branch work with staging
@@ -27,19 +21,26 @@ const config = {
   },
   mode: process.env.NODE_ENV,
   resolve: {
+    extensions: ['.js', '.jsx', '.ts', '.tsx'],
     alias: {
       // Note: the alias for firefox-profiler is defined at the Babel level, so
       // that Jest can profit from it too.
       'firefox-profiler-res': path.resolve(__dirname, 'res'),
     },
+    fallback: { zlib: false },
   },
   devtool: 'source-map',
   module: {
     rules: [
       {
-        test: /\.js$/,
+        test: /\.(js|ts|tsx)$/,
         use: ['babel-loader'],
-        include: includes.concat(es6modulePaths),
+        include: includes,
+      },
+      {
+        test: /\.worker\.js$/,
+        use: ['file-loader'],
+        include: includes,
       },
       {
         test: /\.json$/,
@@ -57,6 +58,7 @@ const config = {
           ...includes,
           path.join(__dirname, 'node_modules', 'photon-colors'),
           path.join(__dirname, 'node_modules', 'react-splitter-layout'),
+          path.join(__dirname, 'node_modules', 'iongraph-web'),
         ],
       },
       {
@@ -97,7 +99,6 @@ const config = {
       patterns: [
         'res/_headers',
         'res/_redirects',
-        'res/zee-worker.js',
         'res/contribute.json',
         'res/robots.txt',
         'res/service-worker-compat.js',

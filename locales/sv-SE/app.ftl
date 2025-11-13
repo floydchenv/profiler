@@ -6,12 +6,6 @@
 ### Localization for the App UI of Profiler
 
 
-# Naming convention for l10n IDs: "ComponentName--string-summary".
-# This allows us to minimize the risk of conflicting IDs throughout the app.
-# Please sort alphabetically by (component name), and
-# keep strings in order of appearance.
-
-
 ## The following feature names must be treated as a brand. They cannot be translated.
 
 -firefox-brand-name = Firefox
@@ -47,6 +41,14 @@ AppViewRouter--error-from-localhost-url-safari =
     .title = Safari kan inte importera lokala profiler
 AppViewRouter--route-not-found--home =
     .specialMessage = Webbadressen du försökte nå kändes inte igen.
+
+## Backtrace
+## This is used to display a backtrace (call stack) for a marker or sample.
+
+# Variables:
+#   $function (String) - Name of the function that was inlined.
+Backtrace--inlining-badge = (infogad)
+    .title = { $function } infogades i sin anropare av kompilatorn.
 
 ## CallNodeContextMenu
 ## This is used as a context menu for the Call Tree, Flame Graph and Stack Chart
@@ -444,6 +446,16 @@ MarkerTable--duration = Längd
 MarkerTable--name = Namn
 MarkerTable--details = Detaljer
 
+## MarkerTooltip
+## This is the component for Marker Tooltip panel.
+
+# This is used as the tooltip for the filter button in marker tooltips.
+# Variables:
+#   $filter (String) - Search string that will be used to filter the markers.
+MarkerTooltip--filter-button-tooltip =
+    .title = Visa endast markörer som matchar: "{ $filter }"
+    .aria-label = Visa endast markörer som matchar: "{ $filter }"
+
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
 
@@ -487,11 +499,16 @@ MenuButtons--index--hide-moreInfo-button = Visa mindre
 #   $physicalCPUs (Number), $logicalCPUs (Number) - Number of Physical and Logical CPU Cores
 MenuButtons--metaInfo--physical-and-logical-cpu =
     { $physicalCPUs ->
-        [one] { $physicalCPUs } fysisk kärna
-       *[other] { $physicalCPUs } fysiska kärnor
-    }, { $logicalCPUs ->
-        [one] { $logicalCPUs } logisk kärna
-       *[other] { $logicalCPUs } logiska kärnor
+        [one]
+            { $logicalCPUs ->
+                [one] { $physicalCPUs } fysisk kärna, { $logicalCPUs } logisk kärna
+               *[other] { $physicalCPUs } fysisk kärna, { $logicalCPUs } logiska kärnor
+            }
+       *[other]
+            { $logicalCPUs ->
+                [one] { $physicalCPUs } fysiska kärnor, { $logicalCPUs } logisk kärna
+               *[other] { $physicalCPUs } fysiska kärnor, { $logicalCPUs } logiska kärnor
+            }
     }
 # This string is used when we only have the information about the number of
 # physical CPU cores.
@@ -515,6 +532,8 @@ MenuButtons--metaInfo--profiling-started = Inspelningen startade:
 MenuButtons--metaInfo--profiling-session = Inspelningslängd:
 MenuButtons--metaInfo--main-process-started = Huvudprocessen startade:
 MenuButtons--metaInfo--main-process-ended = Huvudprocessen avslutad:
+MenuButtons--metaInfo--file-name = Filnamn:
+MenuButtons--metaInfo--file-size = Filstorlek:
 MenuButtons--metaInfo--interval = Intervall:
 MenuButtons--metaInfo--buffer-capacity = Buffertkapacitet:
 MenuButtons--metaInfo--buffer-duration = Buffertlängd:
@@ -729,8 +748,8 @@ ServiceWorkerManager--hide-notice-button =
 
 StackSettings--implementation-all-frames = Alla ramar
     .title = Filtrera inte stackramar
-StackSettings--implementation-javascript2 = JavaScript
-    .title = Visa endast stackramar relaterade till JavaScript-körning
+StackSettings--implementation-script = Skript
+    .title = Visa endast stackramar relaterade till skriptkörning
 StackSettings--implementation-native2 = Intern
     .title = Visa bara stackramar för intern kod
 # This label is displayed in the marker chart and marker table panels only.
@@ -751,6 +770,7 @@ StackSettings--call-tree-strategy-native-deallocations-sites = Tilldelningswebbp
 StackSettings--invert-call-stack = Invertera anropsstack
     .title = Sortera efter tiden i en anropsnod, utan att ignorera dess barn.
 StackSettings--show-user-timing = Visa användartiming
+StackSettings--use-stack-chart-same-widths = Använd samma bredd för varje stack
 StackSettings--panel-search =
     .label = Filtrera stackar:
     .title = Visa endast stackar som innehåller en funktion vars namn matchar denna delsträng
@@ -1120,6 +1140,13 @@ SourceView--not-in-archive-error-when-obtaining-source = Filen { $pathInArchive 
 #   $url (String) - The URL from which the "archive" file was downloaded.
 #   $parsingErrorMessage (String) - The raw internal error message during parsing, not localized
 SourceView--archive-parsing-error-when-obtaining-source = Arkivet på { $url } kunde inte analyseras: { $parsingErrorMessage }
+# Displayed below SourceView--cannot-obtain-source, if a JS file could not be found in
+# the browser.
+# Variables:
+#   $url (String) - The URL of the JS source file.
+#   $sourceUuid (number) - The UUID of the JS source file.
+#   $errorMessage (String) - The raw internal error message, not localized
+SourceView--not-in-browser-error-when-obtaining-js-source = Webbläsaren kunde inte hämta källfilen för { $url } med sourceUuid { $sourceUuid }: { $errorMessage }.
 
 ## Toggle buttons in the top right corner of the bottom box
 

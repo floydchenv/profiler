@@ -6,12 +6,6 @@
 ### Localization for the App UI of Profiler
 
 
-# Naming convention for l10n IDs: "ComponentName--string-summary".
-# This allows us to minimize the risk of conflicting IDs throughout the app.
-# Please sort alphabetically by (component name), and
-# keep strings in order of appearance.
-
-
 ## The following feature names must be treated as a brand. They cannot be translated.
 
 -firefox-brand-name = Firefox
@@ -374,6 +368,16 @@ MarkerTable--duration = Durée
 MarkerTable--name = Nom
 MarkerTable--details = Détails
 
+## MarkerTooltip
+## This is the component for Marker Tooltip panel.
+
+# This is used as the tooltip for the filter button in marker tooltips.
+# Variables:
+#   $filter (String) - Search string that will be used to filter the markers.
+MarkerTooltip--filter-button-tooltip =
+    .title = Afficher uniquement les marqueurs correspondant à « { $filter } »
+    .aria-label = Afficher uniquement les marqueurs correspondant à « { $filter } »
+
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
 
@@ -417,11 +421,16 @@ MenuButtons--index--hide-moreInfo-button = Afficher moins
 #   $physicalCPUs (Number), $logicalCPUs (Number) - Number of Physical and Logical CPU Cores
 MenuButtons--metaInfo--physical-and-logical-cpu =
     { $physicalCPUs ->
-        [one] { $physicalCPUs } cœur physique
-       *[other] { $physicalCPUs } cœurs physiques
-    }, { $logicalCPUs ->
-        [one] { $logicalCPUs } cœur logique
-       *[other] { $logicalCPUs } cœurs logiques
+        [one]
+            { $logicalCPUs ->
+                [one] { $physicalCPUs } cœur physique, { $logicalCPUs } cœur logique
+               *[other] { $physicalCPUs } cœur physique, { $logicalCPUs } cœurs logiques
+            }
+       *[other]
+            { $logicalCPUs ->
+                [one] { $physicalCPUs } cœurs physiques, { $logicalCPUs } cœur logique
+               *[other] { $physicalCPUs } cœurs physiques, { $logicalCPUs } cœurs logiques
+            }
     }
 # This string is used when we only have the information about the number of
 # physical CPU cores.
@@ -445,6 +454,8 @@ MenuButtons--metaInfo--profiling-started = Enregistrement commencé :
 MenuButtons--metaInfo--profiling-session = Durée d’enregistrement :
 MenuButtons--metaInfo--main-process-started = Processus principal démarré :
 MenuButtons--metaInfo--main-process-ended = Processus principal terminé :
+MenuButtons--metaInfo--file-name = Nom du fichier :
+MenuButtons--metaInfo--file-size = Taille du fichier :
 MenuButtons--metaInfo--interval = Intervalle :
 MenuButtons--metaInfo--buffer-capacity = Capacité de la mémoire tampon :
 MenuButtons--metaInfo--buffer-duration = Durée de la mémoire tampon :
@@ -655,8 +666,8 @@ ServiceWorkerManager--hide-notice-button =
 
 StackSettings--implementation-all-frames = Toutes les trames
     .title = Ne pas filtrer les trames de pile
-StackSettings--implementation-javascript2 = JavaScript
-    .title = Afficher uniquement les trames de pile liées à l’exécution JavaScript
+StackSettings--implementation-script = Script
+    .title = Afficher uniquement les cadres de pile liés à l’exécution du script
 StackSettings--implementation-native2 = Natif
     .title = Afficher uniquement les trames de pile pour le code natif
 # This label is displayed in the marker chart and marker table panels only.
@@ -677,6 +688,7 @@ StackSettings--call-tree-strategy-native-deallocations-sites = Sites de désallo
 StackSettings--invert-call-stack = Inverser la pile d’appels
     .title = Trier par le temps passé dans un nœud d’appel, en ignorant ses enfants.
 StackSettings--show-user-timing = Afficher le temps utilisateur
+StackSettings--use-stack-chart-same-widths = Utiliser la même largeur pour chaque pile
 StackSettings--panel-search =
     .label = Filtrer les piles :
     .title = Afficher uniquement les piles qui contiennent une fonction dont le nom correspond à cette sous-chaîne
@@ -1046,6 +1058,13 @@ SourceView--not-in-archive-error-when-obtaining-source = Le fichier { $pathInArc
 #   $url (String) - The URL from which the "archive" file was downloaded.
 #   $parsingErrorMessage (String) - The raw internal error message during parsing, not localized
 SourceView--archive-parsing-error-when-obtaining-source = L’archive à l’adresse { $url } n’a pas pu être analysée : { $parsingErrorMessage }
+# Displayed below SourceView--cannot-obtain-source, if a JS file could not be found in
+# the browser.
+# Variables:
+#   $url (String) - The URL of the JS source file.
+#   $sourceUuid (number) - The UUID of the JS source file.
+#   $errorMessage (String) - The raw internal error message, not localized
+SourceView--not-in-browser-error-when-obtaining-js-source = Le navigateur n’a pas pu obtenir le fichier source pour { $url } avec l’identifiant sourceUuid { $sourceUuid } : { $errorMessage }.
 
 ## Toggle buttons in the top right corner of the bottom box
 

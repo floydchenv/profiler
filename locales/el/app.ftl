@@ -6,12 +6,6 @@
 ### Localization for the App UI of Profiler
 
 
-# Naming convention for l10n IDs: "ComponentName--string-summary".
-# This allows us to minimize the risk of conflicting IDs throughout the app.
-# Please sort alphabetically by (component name), and
-# keep strings in order of appearance.
-
-
 ## The following feature names must be treated as a brand. They cannot be translated.
 
 -firefox-brand-name = Firefox
@@ -47,6 +41,14 @@ AppViewRouter--error-from-localhost-url-safari =
     .title = Το Safari δεν μπορεί να εισαγάγει τοπικά προφίλ
 AppViewRouter--route-not-found--home =
     .specialMessage = Δεν αναγνωρίστηκε το URL που προσπαθήσατε να μεταβείτε.
+
+## Backtrace
+## This is used to display a backtrace (call stack) for a marker or sample.
+
+# Variables:
+#   $function (String) - Name of the function that was inlined.
+Backtrace--inlining-badge = (ενσωματωμένη)
+    .title = Η συνάρτηση «{ $function }» ενσωματώθηκε στο καλούν στοιχείο από τον μεταγλωττιστή.
 
 ## CallNodeContextMenu
 ## This is used as a context menu for the Call Tree, Flame Graph and Stack Chart
@@ -444,6 +446,16 @@ MarkerTable--duration = Διάρκεια
 MarkerTable--name = Όνομα
 MarkerTable--details = Λεπτομέρειες
 
+## MarkerTooltip
+## This is the component for Marker Tooltip panel.
+
+# This is used as the tooltip for the filter button in marker tooltips.
+# Variables:
+#   $filter (String) - Search string that will be used to filter the markers.
+MarkerTooltip--filter-button-tooltip =
+    .title = Εμφάνιση μόνο των αντίστοιχων δεικτών: «{ $filter }»
+    .aria-label = Εμφάνιση μόνο των αντίστοιχων δεικτών: «{ $filter }»
+
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
 
@@ -520,6 +532,8 @@ MenuButtons--metaInfo--profiling-started = Έναρξη καταγραφής:
 MenuButtons--metaInfo--profiling-session = Διάρκεια καταγραφής:
 MenuButtons--metaInfo--main-process-started = Έναρξη κύριας διεργασίας:
 MenuButtons--metaInfo--main-process-ended = Τέλος κύριας διεργασίας:
+MenuButtons--metaInfo--file-name = Όνομα αρχείου:
+MenuButtons--metaInfo--file-size = Μέγεθος αρχείου:
 MenuButtons--metaInfo--interval = Διάστημα:
 MenuButtons--metaInfo--buffer-capacity = Χωρητικότητα buffer:
 MenuButtons--metaInfo--buffer-duration = Διάρκεια buffer:
@@ -734,8 +748,8 @@ ServiceWorkerManager--hide-notice-button =
 
 StackSettings--implementation-all-frames = Όλα τα καρέ
     .title = Να μην γίνεται φιλτράρισμα των καρέ στοίβας
-StackSettings--implementation-javascript2 = JavaScript
-    .title = Εμφάνιση μόνο των καρέ στοίβας που σχετίζονται με την εκτέλεση της JavaScript
+StackSettings--implementation-script = Δέσμη ενεργειών
+    .title = Εμφάνιση μόνο των καρέ στοίβας που σχετίζονται με την εκτέλεση της δέσμης ενεργειών
 StackSettings--implementation-native2 = Εγγενές
     .title = Εμφάνιση μόνο των καρέ στοίβας για εγγενή κώδικα
 # This label is displayed in the marker chart and marker table panels only.
@@ -756,6 +770,7 @@ StackSettings--call-tree-strategy-native-deallocations-sites = Ιστότοπο�
 StackSettings--invert-call-stack = Αναστροφή στοίβας κλήσεων
     .title = Ταξινόμηση κατά χρόνο που χρησιμοποιήθηκε σε κόμβο κλήσεων, αγνοώντας τους θυγατρικούς του.
 StackSettings--show-user-timing = Εμφάνιση χρονισμού χρήστη
+StackSettings--use-stack-chart-same-widths = Χρήση του ίδιου πλάτους για κάθε στοίβα
 StackSettings--panel-search =
     .label = Φιλτράρισμα στοιβών:
     .title = Εμφάνιση μόνο στοιβών που περιέχουν συνάρτηση της οποίας το όνομα αντιστοιχεί σε αυτήν την υποσυμβολοσειρά
@@ -1125,6 +1140,13 @@ SourceView--not-in-archive-error-when-obtaining-source = Το αρχείο «{ $
 #   $url (String) - The URL from which the "archive" file was downloaded.
 #   $parsingErrorMessage (String) - The raw internal error message during parsing, not localized
 SourceView--archive-parsing-error-when-obtaining-source = Δεν ήταν δυνατή η ανάλυση του αρχείου στο { $url }: { $parsingErrorMessage }
+# Displayed below SourceView--cannot-obtain-source, if a JS file could not be found in
+# the browser.
+# Variables:
+#   $url (String) - The URL of the JS source file.
+#   $sourceUuid (number) - The UUID of the JS source file.
+#   $errorMessage (String) - The raw internal error message, not localized
+SourceView--not-in-browser-error-when-obtaining-js-source = Το πρόγραμμα περιήγησης δεν μπόρεσε να λάβει το αρχείο πηγαίου κώδικα για το { $url } με το sourceUuid { $sourceUuid }: { $errorMessage }.
 
 ## Toggle buttons in the top right corner of the bottom box
 

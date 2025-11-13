@@ -6,12 +6,6 @@
 ### Localization for the App UI of Profiler
 
 
-# Naming convention for l10n IDs: "ComponentName--string-summary".
-# This allows us to minimize the risk of conflicting IDs throughout the app.
-# Please sort alphabetically by (component name), and
-# keep strings in order of appearance.
-
-
 ## The following feature names must be treated as a brand. They cannot be translated.
 
 -firefox-brand-name = Firefox
@@ -44,6 +38,14 @@ AppViewRouter--error-from-localhost-url-safari = 由于 <a>Safari 浏览器的�
     .title = Safari 浏览器无法导入本地性能分析记录
 AppViewRouter--route-not-found--home =
     .specialMessage = 无法识别您尝试访问的 URL。
+
+## Backtrace
+## This is used to display a backtrace (call stack) for a marker or sample.
+
+# Variables:
+#   $function (String) - Name of the function that was inlined.
+Backtrace--inlining-badge = （已内联）
+    .title = 编译器已将 { $function } 内联至其调用方。
 
 ## CallNodeContextMenu
 ## This is used as a context menu for the Call Tree, Flame Graph and Stack Chart
@@ -338,7 +340,7 @@ MarkerContextMenu--select-the-sender-thread = 选择 Sender 线程“<strong>{ $
 # This string is used on the marker filters menu item when clicked on the filter icon.
 # Variables:
 #   $filter (String) - Search string that will be used to filter the markers.
-MarkerFiltersContextMenu--drop-samples-outside-of-markers-matching = 不用标记过滤器“<strong>{ $filter }</strong>”标记此样本
+MarkerFiltersContextMenu--drop-samples-outside-of-markers-matching = 丢弃与标记（匹配条件：“<strong>{ $filter }</strong>”）不相关的样本
 
 ## MarkerSettings
 ## This is used in all panels related to markers.
@@ -361,6 +363,16 @@ MarkerTable--start = 开始
 MarkerTable--duration = 持续时间
 MarkerTable--name = 名称
 MarkerTable--details = 详情
+
+## MarkerTooltip
+## This is the component for Marker Tooltip panel.
+
+# This is used as the tooltip for the filter button in marker tooltips.
+# Variables:
+#   $filter (String) - Search string that will be used to filter the markers.
+MarkerTooltip--filter-button-tooltip =
+    .title = 仅显示匹配“{ $filter }”的标记
+    .aria-label = 仅显示匹配“{ $filter }”的标记
 
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
@@ -642,8 +654,8 @@ ServiceWorkerManager--hide-notice-button =
 
 StackSettings--implementation-all-frames = 所有帧
     .title = 不过滤栈上的帧
-StackSettings--implementation-javascript2 = JavaScript
-    .title = 仅显示栈上需要执行的 JavaScript 帧
+StackSettings--implementation-script = 脚本
+    .title = 只显示与执行脚本相关的栈帧
 StackSettings--implementation-native2 = 原生
     .title = 仅显示栈上的原生代码帧
 # This label is displayed in the marker chart and marker table panels only.
@@ -664,6 +676,7 @@ StackSettings--call-tree-strategy-native-deallocations-sites = 释放的位置
 StackSettings--invert-call-stack = 反转调用栈
     .title = 按照调用节点中所用时间排序，并忽略其 children。
 StackSettings--show-user-timing = 显示用户计时
+StackSettings--use-stack-chart-same-widths = 所有栈使用相同宽度显示
 StackSettings--panel-search =
     .label = 过滤栈：
     .title = 只显示包含匹配的子字符串的函数名称的相关栈
@@ -944,7 +957,7 @@ TransformNavigator--collapse-function-subtree = 折叠子树：{ $item }
 # "Drop samples outside of markers matching ..." transform.
 # Variables:
 #   $item (String) - Search filter of the markers that transform will apply to.
-TransformNavigator--drop-samples-outside-of-markers-matching = 不用过滤器 “{ $item }” 标记该样本
+TransformNavigator--drop-samples-outside-of-markers-matching = 丢弃与标记（匹配条件：“{ $item }”）不相关的样本
 
 ## "Bottom box" - a view which contains the source view and the assembly view,
 ## at the bottom of the profiler UI
@@ -1033,6 +1046,13 @@ SourceView--not-in-archive-error-when-obtaining-source = { $url } 处的存档�
 #   $url (String) - The URL from which the "archive" file was downloaded.
 #   $parsingErrorMessage (String) - The raw internal error message during parsing, not localized
 SourceView--archive-parsing-error-when-obtaining-source = 无法解析 { $url } 处的存档：{ $parsingErrorMessage }
+# Displayed below SourceView--cannot-obtain-source, if a JS file could not be found in
+# the browser.
+# Variables:
+#   $url (String) - The URL of the JS source file.
+#   $sourceUuid (number) - The UUID of the JS source file.
+#   $errorMessage (String) - The raw internal error message, not localized
+SourceView--not-in-browser-error-when-obtaining-js-source = 浏览器无法获取位置为 { $url }、sourceUuid 为 { $sourceUuid } 的源代码文件：{ $errorMessage }。
 
 ## Toggle buttons in the top right corner of the bottom box
 

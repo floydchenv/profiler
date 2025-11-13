@@ -125,12 +125,16 @@
   background-color: #edf6ff;
 }
 
+.cm-highlightedLine {
+  background-color: #fffbcc;
+}
+
 .cm-content {
   font-family: ui-monospace, 'Roboto Mono', monospace;
   hyphens: none;
+  overflow-wrap: normal;
   word-break: normal;
   word-spacing: normal;
-  word-wrap: normal;
 }
 
 /**

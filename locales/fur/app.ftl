@@ -6,12 +6,6 @@
 ### Localization for the App UI of Profiler
 
 
-# Naming convention for l10n IDs: "ComponentName--string-summary".
-# This allows us to minimize the risk of conflicting IDs throughout the app.
-# Please sort alphabetically by (component name), and
-# keep strings in order of appearance.
-
-
 ## The following feature names must be treated as a brand. They cannot be translated.
 
 -firefox-brand-name = Firefox
@@ -699,8 +693,8 @@ ServiceWorkerManager--hide-notice-button =
 
 StackSettings--implementation-all-frames = Ducj i ricuadris
     .title = No sta filtrâ i ricuadris dal stack
-StackSettings--implementation-javascript2 = JavaScript
-    .title = Mostre dome i ricuadris dal stack corelâts ae esecuzion di JavaScript
+StackSettings--implementation-script = Script
+    .title = Mostre dome lis istantaniis dal stack relativis ae esecuzion dal script
 StackSettings--implementation-native2 = Natîf
     .title = Mostre dome i ricuadris dal stack pal codiç natîf
 # This label is displayed in the marker chart and marker table panels only.
@@ -721,6 +715,7 @@ StackSettings--call-tree-strategy-native-deallocations-sites = Sîts disassegnâ
 StackSettings--invert-call-stack = Invertìs stack di clamade
     .title = Ordene in base al timp doprât intun grop di clamade, ignorant i fîs.
 StackSettings--show-user-timing = Mostre timp utent
+StackSettings--use-stack-chart-same-widths = Dopre la stesse largjece par ogni stack
 StackSettings--panel-search =
     .label = Filtre stacks:
     .title = Visualize dome i stacks che a contegnin une funzion là che il so non al corispuint a cheste sotstringhe
@@ -1090,6 +1085,13 @@ SourceView--not-in-archive-error-when-obtaining-source = Il file { $pathInArchiv
 #   $url (String) - The URL from which the "archive" file was downloaded.
 #   $parsingErrorMessage (String) - The raw internal error message during parsing, not localized
 SourceView--archive-parsing-error-when-obtaining-source = Impussibil analizâ l’archivi in { $url }: { $parsingErrorMessage }
+# Displayed below SourceView--cannot-obtain-source, if a JS file could not be found in
+# the browser.
+# Variables:
+#   $url (String) - The URL of the JS source file.
+#   $sourceUuid (number) - The UUID of the JS source file.
+#   $errorMessage (String) - The raw internal error message, not localized
+SourceView--not-in-browser-error-when-obtaining-js-source = Il navigadôr nol è rivât a otignî il file sorzint par { $url } cun sourceUuid { $sourceUuid }: { $errorMessage }.
 
 ## Toggle buttons in the top right corner of the bottom box
 

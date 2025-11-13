@@ -1,7 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-// @flow
 
 /*:: type AgentsVersion = { [agentName: string]: string }; */
 
@@ -99,15 +98,18 @@ function checkYarn(agents /*: AgentsVersion */) {
 }
 
 function parseExpectedNodeVersion() {
-  // Let's fetch our minimal version from circleci's file
+  // Let's fetch our minimal version from GitHub Actions composite action file
   const fs = require('fs');
-  const circleConfig = fs.readFileSync('.circleci/config.yml', {
-    encoding: 'utf8',
-  });
-  const expectedNodeVersion = /image: cimg\/node:([\d.]+)/.exec(circleConfig);
+  const actionConfig = fs.readFileSync(
+    '.github/actions/setup-node-and-install/action.yml',
+    {
+      encoding: 'utf8',
+    }
+  );
+  const expectedNodeVersion = /node-version:\s*'([\d.]+)'/.exec(actionConfig);
   if (!expectedNodeVersion) {
     throw new Error(
-      `Couldn't extract the node version from .circleci/config.yml.`
+      `Couldn't extract the node version from .github/actions/setup-node-and-install/action.yml.`
     );
   }
   return expectedNodeVersion[1];

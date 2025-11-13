@@ -6,12 +6,6 @@
 ### Localization for the App UI of Profiler
 
 
-# Naming convention for l10n IDs: "ComponentName--string-summary".
-# This allows us to minimize the risk of conflicting IDs throughout the app.
-# Please sort alphabetically by (component name), and
-# keep strings in order of appearance.
-
-
 ## The following feature names must be treated as a brand. They cannot be translated.
 
 -firefox-brand-name = Firefox
@@ -44,6 +38,14 @@ AppViewRouter--error-from-localhost-url-safari = Aufgrund einer <a>spezifischen 
     .title = Safari kann lokale Profile nicht importieren
 AppViewRouter--route-not-found--home =
     .specialMessage = Die URL, die Sie erreichen wollten, wurde nicht erkannt.
+
+## Backtrace
+## This is used to display a backtrace (call stack) for a marker or sample.
+
+# Variables:
+#   $function (String) - Name of the function that was inlined.
+Backtrace--inlining-badge = (inlined)
+    .title = { $function } wurde durch den Compiler zur Inline-Funktion ihres Aufrufers.
 
 ## CallNodeContextMenu
 ## This is used as a context menu for the Call Tree, Flame Graph and Stack Chart
@@ -425,6 +427,16 @@ MarkerTable--duration = Dauer
 MarkerTable--name = Name
 MarkerTable--details = Details
 
+## MarkerTooltip
+## This is the component for Marker Tooltip panel.
+
+# This is used as the tooltip for the filter button in marker tooltips.
+# Variables:
+#   $filter (String) - Search string that will be used to filter the markers.
+MarkerTooltip--filter-button-tooltip =
+    .title = Nur passende Markierungen anzeigen: „{ $filter }“
+    .aria-label = Nur passende Markierungen anzeigen: „{ $filter }“
+
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
 
@@ -468,11 +480,16 @@ MenuButtons--index--hide-moreInfo-button = Weniger anzeigen
 #   $physicalCPUs (Number), $logicalCPUs (Number) - Number of Physical and Logical CPU Cores
 MenuButtons--metaInfo--physical-and-logical-cpu =
     { $physicalCPUs ->
-        [one] { $physicalCPUs } physischer Kern
-       *[other] { $physicalCPUs } physische Kerne
-    },{ $logicalCPUs ->
-        [one] { $logicalCPUs } logischer Kern
-       *[other] { $logicalCPUs } logische Kerne
+        [one]
+            { $logicalCPUs ->
+                [one] { $physicalCPUs } physischer Kern,{ $logicalCPUs } logischer Kern
+               *[other] { $physicalCPUs } physischer Kern,{ $logicalCPUs } logische Kerne
+            }
+       *[other]
+            { $logicalCPUs ->
+                [one] { $physicalCPUs } physische Kerne,{ $logicalCPUs } logischer Kern
+               *[other] { $physicalCPUs } physische Kerne,{ $logicalCPUs } logische Kerne
+            }
     }
 # This string is used when we only have the information about the number of
 # physical CPU cores.
@@ -496,6 +513,8 @@ MenuButtons--metaInfo--profiling-started = Aufzeichnungsbeginn:
 MenuButtons--metaInfo--profiling-session = Aufzeichnungslänge:
 MenuButtons--metaInfo--main-process-started = Hauptprozess gestartet:
 MenuButtons--metaInfo--main-process-ended = Hauptprozess beendet:
+MenuButtons--metaInfo--file-name = Dateiname:
+MenuButtons--metaInfo--file-size = Dateigröße:
 MenuButtons--metaInfo--interval = Intervall:
 MenuButtons--metaInfo--buffer-capacity = Pufferkapazität:
 MenuButtons--metaInfo--buffer-duration = Pufferdauer:
@@ -710,8 +729,8 @@ ServiceWorkerManager--hide-notice-button =
 
 StackSettings--implementation-all-frames = Alle Frames
     .title = Die Stack-Frames nicht filtern
-StackSettings--implementation-javascript2 = JavaScript
-    .title = Nur die Stack-Frames anzeigen, die sich auf JavaScript-Ausführung beziehen
+StackSettings--implementation-script = Skript
+    .title = Nur Stack-Frames anzeigen, die mit Skriptausführung zusammenhängen.
 StackSettings--implementation-native2 = Native
     .title = Nur die Stack-Frames für nativen Quelltext anzeigen
 # This label is displayed in the marker chart and marker table panels only.
@@ -732,6 +751,7 @@ StackSettings--call-tree-strategy-native-deallocations-sites = Freigegebene Webs
 StackSettings--invert-call-stack = Aufrufstack umkehren
     .title = Sortieren nach in einem Aufrufknoten, die Unterpunkte werden ignoriert.
 StackSettings--show-user-timing = Nutzer-Zeitrechnung anzeigen
+StackSettings--use-stack-chart-same-widths = Für jeden Stapel die gleiche Breite verwenden
 StackSettings--panel-search =
     .label = Stacks filtern:
     .title = Nur Stacks anzeigen, die eine Funktion enthalten, deren Namen zu diesem Unterstring passen
@@ -1101,6 +1121,13 @@ SourceView--not-in-archive-error-when-obtaining-source = Die Datei { $pathInArch
 #   $url (String) - The URL from which the "archive" file was downloaded.
 #   $parsingErrorMessage (String) - The raw internal error message during parsing, not localized
 SourceView--archive-parsing-error-when-obtaining-source = Das Archiv unter { $url } konnte nicht geparst werden: { $parsingErrorMessage }
+# Displayed below SourceView--cannot-obtain-source, if a JS file could not be found in
+# the browser.
+# Variables:
+#   $url (String) - The URL of the JS source file.
+#   $sourceUuid (number) - The UUID of the JS source file.
+#   $errorMessage (String) - The raw internal error message, not localized
+SourceView--not-in-browser-error-when-obtaining-js-source = Der Browser konnte die Quelltextdatei für { $url } mit der sourceUuid { $sourceUuid } nicht abrufen: { $errorMessage }.
 
 ## Toggle buttons in the top right corner of the bottom box
 

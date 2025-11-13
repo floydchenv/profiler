@@ -1,7 +1,6 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-// @flow
 //
 import { TestEnvironment } from 'jest-environment-jsdom';
 import { TextDecoder, TextEncoder } from 'util';
@@ -40,5 +39,7 @@ export default class CustomTestEnvironment extends TestEnvironment {
     this.global.Request = Request;
     this.global.Response = Response;
     this.global.ReadableStream = ReadableStream;
+    this.global.CompressionStream = CompressionStream;
+    this.global.DecompressionStream = DecompressionStream;
   }
 }

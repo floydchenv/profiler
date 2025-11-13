@@ -6,12 +6,6 @@
 ### Localization for the App UI of Profiler
 
 
-# Naming convention for l10n IDs: "ComponentName--string-summary".
-# This allows us to minimize the risk of conflicting IDs throughout the app.
-# Please sort alphabetically by (component name), and
-# keep strings in order of appearance.
-
-
 ## The following feature names must be treated as a brand. They cannot be translated.
 
 -firefox-brand-name = Firefox
@@ -47,6 +41,14 @@ AppViewRouter--error-from-localhost-url-safari =
     .title = Safari kan geen lokale profielen importeren
 AppViewRouter--route-not-found--home =
     .specialMessage = De URL dy’t jo probearre te berikken, waard net werkend.
+
+## Backtrace
+## This is used to display a backtrace (call stack) for a marker or sample.
+
+# Variables:
+#   $function (String) - Name of the function that was inlined.
+Backtrace--inlining-badge = (inline pleatst)
+    .title = { $function } is troch de compiler inline yn de oanropomjouwing pleatst
 
 ## CallNodeContextMenu
 ## This is used as a context menu for the Call Tree, Flame Graph and Stack Chart
@@ -449,6 +451,16 @@ MarkerTable--duration = Doer
 MarkerTable--name = Namme
 MarkerTable--details = Details
 
+## MarkerTooltip
+## This is the component for Marker Tooltip panel.
+
+# This is used as the tooltip for the filter button in marker tooltips.
+# Variables:
+#   $filter (String) - Search string that will be used to filter the markers.
+MarkerTooltip--filter-button-tooltip =
+    .title = Allinnich markearringen toane dy’t oerienkomme mei: ‘{ $filter }’
+    .aria-label = Allinnich markearringen toane dy’t oerienkomme mei: ‘{ $filter }’
+
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
 
@@ -492,11 +504,16 @@ MenuButtons--index--hide-moreInfo-button = Minder toane
 #   $physicalCPUs (Number), $logicalCPUs (Number) - Number of Physical and Logical CPU Cores
 MenuButtons--metaInfo--physical-and-logical-cpu =
     { $physicalCPUs ->
-        [one] { $physicalCPUs } fysike kearn,
-       *[other] { $physicalCPUs } fysike kearnen,
-    }{ $logicalCPUs ->
-        [one] { $logicalCPUs } logyske kearn
-       *[other] { $logicalCPUs } logyske kearnen
+        [one]
+            { $logicalCPUs ->
+                [one] { $physicalCPUs } fysike kearn,{ $logicalCPUs } logyske kearn
+               *[other] { $physicalCPUs } fysike kearn,{ $logicalCPUs } logyske kearnen
+            }
+       *[other]
+            { $logicalCPUs ->
+                [one] { $physicalCPUs } fysike kearnen,{ $logicalCPUs } logyske kearn
+               *[other] { $physicalCPUs } fysike kearnen,{ $logicalCPUs } logyske kearnen
+            }
     }
 # This string is used when we only have the information about the number of
 # physical CPU cores.
@@ -520,6 +537,8 @@ MenuButtons--metaInfo--profiling-started = Opname start:
 MenuButtons--metaInfo--profiling-session = Opnamedoer:
 MenuButtons--metaInfo--main-process-started = Haadproses start:
 MenuButtons--metaInfo--main-process-ended = Haadproses stoppe:
+MenuButtons--metaInfo--file-name = Bestânsnamme:
+MenuButtons--metaInfo--file-size = Bestânsgrutte:
 MenuButtons--metaInfo--interval = Ynterfal:
 MenuButtons--metaInfo--buffer-capacity = Bufferkapasiteit:
 MenuButtons--metaInfo--buffer-duration = Bufferdoer:
@@ -734,8 +753,8 @@ ServiceWorkerManager--hide-notice-button =
 
 StackSettings--implementation-all-frames = Alle frames
     .title = De stackframes net filterje
-StackSettings--implementation-javascript2 = JavaScript
-    .title = Allinnich de stackframes relatearre oan útfiering fan JavaScript toane
+StackSettings--implementation-script = Script
+    .title = Allinnich de stackframes relatearre oan scriptútfiering toane
 StackSettings--implementation-native2 = Ynboud
     .title = Allinnich de stackframes foar ynboude koade toane
 # This label is displayed in the marker chart and marker table panels only.
@@ -756,6 +775,7 @@ StackSettings--call-tree-strategy-native-deallocations-sites = De-allokaasje fan
 StackSettings--invert-call-stack = Oanropstack omkeare
     .title = Sortearje op de tiid dy’t yn in oanropnode bestege wurdt, wêrby ûnderlizzende nodes negearre wurde
 StackSettings--show-user-timing = Brûkerstiming toane
+StackSettings--use-stack-chart-same-widths = Foar elke stack deselde breedte brûke
 StackSettings--panel-search =
     .label = Stacks filterje:
     .title = Allinnich stacks toane dy’t in funksje befetsje wêrfan de namme oerienkomt mei dizze substring
@@ -1125,6 +1145,13 @@ SourceView--not-in-archive-error-when-obtaining-source = It bestân { $pathInArc
 #   $url (String) - The URL from which the "archive" file was downloaded.
 #   $parsingErrorMessage (String) - The raw internal error message during parsing, not localized
 SourceView--archive-parsing-error-when-obtaining-source = It argyf op { $url } koe net ferwurke wurde: { $parsingErrorMessage }
+# Displayed below SourceView--cannot-obtain-source, if a JS file could not be found in
+# the browser.
+# Variables:
+#   $url (String) - The URL of the JS source file.
+#   $sourceUuid (number) - The UUID of the JS source file.
+#   $errorMessage (String) - The raw internal error message, not localized
+SourceView--not-in-browser-error-when-obtaining-js-source = De browser koe it boarnebestân foar { $url } mei sourceUuid { $sourceUuid } net krije: { $errorMessage }.
 
 ## Toggle buttons in the top right corner of the bottom box
 

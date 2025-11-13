@@ -6,12 +6,6 @@
 ### Localization for the App UI of Profiler
 
 
-# Naming convention for l10n IDs: "ComponentName--string-summary".
-# This allows us to minimize the risk of conflicting IDs throughout the app.
-# Please sort alphabetically by (component name), and
-# keep strings in order of appearance.
-
-
 ## The following feature names must be treated as a brand. They cannot be translated.
 
 -firefox-brand-name = Firefox
@@ -47,6 +41,14 @@ AppViewRouter--error-from-localhost-url-safari =
     .title = Safari не можа імпартаваць лакальныя профілі
 AppViewRouter--route-not-found--home =
     .specialMessage = URL-адрас, да якога вы намагаецеся атрымаць доступ, не распазнаны.
+
+## Backtrace
+## This is used to display a backtrace (call stack) for a marker or sample.
+
+# Variables:
+#   $function (String) - Name of the function that was inlined.
+Backtrace--inlining-badge = (убудаваны)
+    .title = { $function } была ўбудавана ў месца выкліку кампілятарам.
 
 ## CallNodeContextMenu
 ## This is used as a context menu for the Call Tree, Flame Graph and Stack Chart
@@ -427,6 +429,16 @@ MarkerTable--duration = Працягласць
 MarkerTable--name = Назва
 MarkerTable--details = Падрабязнасці
 
+## MarkerTooltip
+## This is the component for Marker Tooltip panel.
+
+# This is used as the tooltip for the filter button in marker tooltips.
+# Variables:
+#   $filter (String) - Search string that will be used to filter the markers.
+MarkerTooltip--filter-button-tooltip =
+    .title = Паказваць толькі маркёры, якія адпавядаюць: “{ $filter }”
+    .aria-label = Паказваць толькі маркёры, якія адпавядаюць: “{ $filter }”
+
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
 
@@ -737,8 +749,8 @@ ServiceWorkerManager--hide-notice-button =
 
 StackSettings--implementation-all-frames = Усе кадры
     .title = Не фільтраваць кадры стэка
-StackSettings--implementation-javascript2 = JavaScript
-    .title = Паказваць толькі кадры стэка, звязаныя з выкананнем JavaScript
+StackSettings--implementation-script = Скрыпт
+    .title = Паказваць толькі фрэймы стэку, датычныя выканання скрыпта
 StackSettings--implementation-native2 = Убудаваны
     .title = Паказваць толькі кадры стэка для платформна-залежнага кода
 # This label is displayed in the marker chart and marker table panels only.
@@ -759,6 +771,7 @@ StackSettings--call-tree-strategy-native-deallocations-sites = Вызвален�
 StackSettings--invert-call-stack = Інвертаваць стэк выклікаў
     .title = Сартаваць па часе, праведзенаму ў вузле выкліку, ігнаруючы яго даччыныя вузлы.
 StackSettings--show-user-timing = Паказаць таймінгі карыстальніка
+StackSettings--use-stack-chart-same-widths = Выкарыстоўваць аднолькавую шырыню для кожнага стэка
 StackSettings--panel-search =
     .label = Фільтр стэкаў:
     .title = Паказаць толькі стэкі, якія змяшчаюць функцыю, назва якой адпавядае гэтаму падрадку
@@ -1128,6 +1141,13 @@ SourceView--not-in-archive-error-when-obtaining-source = Файл { $pathInArchi
 #   $url (String) - The URL from which the "archive" file was downloaded.
 #   $parsingErrorMessage (String) - The raw internal error message during parsing, not localized
 SourceView--archive-parsing-error-when-obtaining-source = Не ўдалося прааналізаваць архіў па адрасе { $url }: { $parsingErrorMessage }
+# Displayed below SourceView--cannot-obtain-source, if a JS file could not be found in
+# the browser.
+# Variables:
+#   $url (String) - The URL of the JS source file.
+#   $sourceUuid (number) - The UUID of the JS source file.
+#   $errorMessage (String) - The raw internal error message, not localized
+SourceView--not-in-browser-error-when-obtaining-js-source = Браўзеру не ўдалося атрымаць зыходны файл для { $url } з sourceUuid { $sourceUuid }: { $errorMessage }.
 
 ## Toggle buttons in the top right corner of the bottom box
 
