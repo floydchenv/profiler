@@ -25,3 +25,39 @@ export async function dataUrlToBytes(dataUrl: string): Promise<ArrayBuffer> {
   const res = await fetch(dataUrl);
   return res.arrayBuffer();
 }
+
+function base64StringToBytesFallback(base64: string): ArrayBuffer {
+  const binaryString = atob(base64);
+  const bytes = new Uint8Array(binaryString.length);
+  for (let i = 0; i < binaryString.length; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes.buffer;
+}
+
+function bytesToBase64Fallback(bytes: ArrayBuffer): string {
+  let byteStr = '';
+  const u8array = new Uint8Array(bytes);
+  for (let i = 0; i < u8array.byteLength; i++) {
+    byteStr += String.fromCharCode(u8array[i]);
+  }
+  return btoa(byteStr);
+}
+
+export function base64StringToBytes(base64: string): ArrayBuffer {
+  if ('fromBase64' in Uint8Array) {
+    // @ts-expect-error Uint8Array.fromBase64 is a relatively new API
+    return Uint8Array.fromBase64(base64).buffer;
+  }
+
+  return base64StringToBytesFallback(base64);
+}
+
+export function bytesToBase64(bytes: ArrayBuffer): string {
+  if ('toBase64' in Uint8Array.prototype) {
+    // @ts-expect-error Uint8Array.prototype.toBase64 is a relatively new API
+    return new Uint8Array(bytes).toBase64();
+  }
+
+  return bytesToBase64Fallback(bytes);
+}

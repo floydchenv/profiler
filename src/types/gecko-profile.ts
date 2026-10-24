@@ -124,6 +124,7 @@ export type GeckoSamples = {
         stack: 0;
         time: 1;
         eventDelay: 2;
+        argumentValues?: 3;
         threadCPUDelta?: 3;
       };
   data: Array<
@@ -140,8 +141,14 @@ export type GeckoSamples = {
         // milliseconds since the last event was processed in this
         // thread's event loop at the time that the sample was taken
         Milliseconds,
+        // Index into the values buffer containing a binary representation of the argumentValues
+        // It's present only when the JS Execution Tracing feature is enabled in Firefox
+        //   OR
         // CPU usage value of the current thread.
         // It's present only when the CPU Utilization feature is enabled in Firefox.
+        //
+        // NOTE: these two options are mutually exclusive since CPU Utilization is
+        // mutually exclusive with JS Execution Tracing
         number | null,
       ]
   >;
@@ -158,6 +165,7 @@ export type GeckoSampleStructWithResponsiveness = {
   // versions may not have it or that feature could be disabled. No upgrader was
   // written for this change because it's a completely new data source.
   threadCPUDelta?: Array<number | null>;
+  argumentValues?: Array<number | null>;
   length: number;
 };
 
@@ -172,6 +180,7 @@ export type GeckoSampleStructWithEventDelay = {
   // versions may not have it or that feature could be disabled. No upgrader was
   // written for this change because it's a completely new data source.
   threadCPUDelta?: Array<number | null>;
+  argumentValues?: Array<number | null>;
   length: number;
 };
 
@@ -282,6 +291,8 @@ export type GeckoThread = {
   stackTable: GeckoStackTable;
   stringTable: string[];
   jsTracerEvents?: JsTracerTable;
+  tracedValues?: string;
+  tracedObjectShapes?: Array<string[] | null>;
 };
 
 export type GeckoExtensionMeta = {
@@ -384,6 +395,11 @@ export type GeckoMetaMarkerSchema = {
 
   // if present, give the marker its own local track
   graphs?: Array<MarkerGraph>;
+
+  // If present, specifies the key of a marker field that contains the marker's color.
+  // The field should contain one of the GraphColor values.
+  // This allows individual markers to have different colors based on their data.
+  colorField?: string;
 
   // If set to true, markers of this type are assumed to be well-nested with all
   // other stack-based markers on the same thread. Stack-based markers may
@@ -550,22 +566,29 @@ export type ProfilingLog = {
 
 /**
  * Table containing source code file references in the Gecko profile format.
- * Each entry maps a unique UUID to a filename, allowing frames to reference
- * their source files for displaying source code context in the profiler UI.
- * This table is optional and only present in newer Firefox versions.
+ * Each entry maps a unique ID to a filename and optional metadata, allowing
+ * frames to reference their source files for displaying source code context
+ * in the profiler UI. This table is optional and only present in newer
+ * Firefox versions.
  *
  * Note: In Gecko profiles, this table only contains sources for JavaScript code.
  * The processed profile format expands this to include native code sources as well.
  */
 export type GeckoSourceTable = {
   schema: {
-    uuid: 0;
+    id: 0;
     filename: 1;
+    startLine: 2;
+    startColumn: 3;
+    sourceMapURL: 4;
   };
   data: Array<
     [
-      string, // UUID for the source
-      string, // Filename of the source
+      string, // ID for the source.
+      string, // Filename of the source.
+      number, // Start line of the source (1-based).
+      number, // Start column of the source (1-based).
+      string | null, // URL to the source map for this source, if available.
     ]
   >;
 };
@@ -578,8 +601,7 @@ export type GeckoProfileWithMeta<Meta> = {
   meta: Meta;
   libs: LibMapping[];
   pages?: PageList;
-  // Optional because older Firefox versions may not have this table.
-  sources?: GeckoSourceTable;
+  sources: GeckoSourceTable;
   threads: GeckoThread[];
   pausedRanges: PausedRange[];
   processes: GeckoSubprocessProfile[];

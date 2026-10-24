@@ -3,205 +3,537 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import { computeStringIndexMarkerFieldsByDataType } from './marker-schema';
+import { subcategoriesNeedSixteenBits } from './profile-data';
+import { type BitSet, makeBitSet, setBit, checkBit } from '../utils/bitset';
 
 import type {
   Profile,
   RawThread,
   RawProfileSharedData,
   RawMarkerTable,
-  FuncTable,
+  IndexIntoStackTable,
+  RawStackTable,
+  RawFrameTable,
+  RawFuncTable,
   ResourceTable,
-  NativeSymbolTable,
+  RawNativeSymbolTable,
+  Lib,
   SourceTable,
+  SourceLocationTable,
 } from 'firefox-profiler/types';
+import { FrameFlag, FuncFlag } from 'firefox-profiler/types';
+import {
+  assertExhaustiveCheck,
+  ensureExists,
+} from 'firefox-profiler/utils/types';
+
+export type TranslationMaps = {
+  oldStackToNewStackPlusOne: Int32Array;
+  oldFrameToNewFramePlusOne: Int32Array;
+  oldFuncToNewFuncPlusOne: Int32Array;
+  oldResourceToNewResourcePlusOne: Int32Array;
+  oldNativeSymbolToNewNativeSymbolPlusOne: Int32Array;
+  oldSourceToNewSourcePlusOne: Int32Array;
+  oldStringToNewStringPlusOne: Int32Array;
+  oldLibToNewLibPlusOne: Int32Array;
+};
 
 export type CompactedProfileWithTranslationMaps = {
   profile: Profile;
-  oldStringToNewStringPlusOne: Int32Array;
-  oldSourceToNewSourcePlusOne: Int32Array;
+  translationMaps: TranslationMaps;
+};
+
+type NumericArrayConstructor =
+  | Uint8ArrayConstructor
+  | Uint16ArrayConstructor
+  | Uint32ArrayConstructor
+  | Int32ArrayConstructor
+  | Float64ArrayConstructor;
+
+/**
+ * `NO_REF_TYPED` is only offered for columns which hold plain numbers, since
+ * those are the only ones that fit into a typed array. Columns whose elements
+ * can be `null` (or strings, or booleans) are excluded: putting a `null` into a
+ * typed array would silently turn it into a zero.
+ */
+type TypedColumnDescription<TCol> =
+  TCol extends ArrayLike<number>
+    ? { type: 'NO_REF_TYPED'; arrayConstructor: NumericArrayConstructor }
+    : never;
+
+type ColumnDescription<TCol> =
+  | TypedColumnDescription<TCol>
+  | (null extends (TCol extends Array<infer E> ? E : never)
+      ?
+          | { type: 'INDEX_REF_OR_NULL'; referencedTable: TableCompactionState }
+          | { type: 'NO_REF' }
+      : Int32Array<ArrayBuffer> extends TCol
+        ?
+            | { type: 'INDEX_REF_INT32'; referencedTable: TableCompactionState }
+            | {
+                type: 'INDEX_REF_INT32_GATED_BY_FLAG';
+                referencedTable: TableCompactionState;
+                flagBit: number;
+              }
+            | { type: 'SELF_RELATIVE_PARENT' }
+            | { type: 'NO_REF' }
+        :
+            | { type: 'INDEX_REF'; referencedTable: TableCompactionState }
+            | { type: 'NO_REF' });
+
+type TableDescription<T> = {
+  [
+    K in keyof T as T[K] extends
+      | Array<any>
+      | Int32Array<ArrayBuffer>
+      | Uint8Array<ArrayBuffer>
+      | Uint16Array<ArrayBuffer>
+      | Uint32Array<ArrayBuffer>
+      | Float64Array<ArrayBuffer>
+      ? K
+      : never
+  ]: ColumnDescription<T[K]>;
+};
+
+const ColDesc = {
+  indexRef: (referencedTable: TableCompactionState) => ({
+    type: 'INDEX_REF' as const,
+    referencedTable,
+  }),
+  indexRefInt32: (referencedTable: TableCompactionState) => ({
+    type: 'INDEX_REF_INT32' as const,
+    referencedTable,
+  }),
+  indexRefInt32GatedByFlag: (
+    referencedTable: TableCompactionState,
+    flagBit: number
+  ) => ({
+    type: 'INDEX_REF_INT32_GATED_BY_FLAG' as const,
+    referencedTable,
+    flagBit,
+  }),
+  indexRefOrNull: (referencedTable: TableCompactionState) => ({
+    type: 'INDEX_REF_OR_NULL' as const,
+    referencedTable,
+  }),
+  selfPrefixOffset: () => ({ type: 'SELF_RELATIVE_PARENT' as const }),
+  noRef: () => ({ type: 'NO_REF' as const }),
+  // Like noRef, but the compacted column is always a typed array of the given
+  // kind, even if the old column was a plain array. Use this for every column
+  // whose format type allows a typed array, so that compaction normalizes the
+  // representation instead of preserving whatever the profile was loaded with.
+  noRefTyped: (arrayConstructor: NumericArrayConstructor) => ({
+    type: 'NO_REF_TYPED' as const,
+    arrayConstructor,
+  }),
+};
+
+class TableCompactionState {
+  markBuffer: BitSet;
+  oldIndexToNewIndexPlusOne: Int32Array;
+  newLength: number | null = null;
+
+  constructor(itemCount: number) {
+    this.markBuffer = makeBitSet(itemCount);
+    this.oldIndexToNewIndexPlusOne = new Int32Array(itemCount);
+  }
+
+  computeIndexTranslation(): void {
+    let newLength = 0;
+    for (let i = 0; i < this.oldIndexToNewIndexPlusOne.length; i++) {
+      if (checkBit(this.markBuffer, i)) {
+        this.oldIndexToNewIndexPlusOne[i] = newLength + 1;
+        newLength++;
+      }
+    }
+    this.newLength = newLength;
+  }
+}
+
+type TableCompactionStates = {
+  stackTable: TableCompactionState;
+  frameTable: TableCompactionState;
+  funcTable: TableCompactionState;
+  resourceTable: TableCompactionState;
+  nativeSymbols: TableCompactionState;
+  sources: TableCompactionState;
+  sourceLocationTable: TableCompactionState;
+  stringArray: TableCompactionState;
+  libs: TableCompactionState;
 };
 
 /**
- * Returns a new profile with all unreferenced strings and sources removed.
+ * Returns a new profile with all unreferenced data removed.
  *
- * Since the string table and source table are shared between all threads, if
- * the user asks for a thread to be removed during sanitization, by default
- * we'd keep the strings and sources from the removed threads in the profile.
+ * The markers and samples in the profile are the "GC roots". All other data
+ * tables exist only to make the marker and sample data meaningful.
+ * (Here, sample data includes allocation samples from thread.jsAllocations and
+ * thread.nativeAllocations.)
  *
- * By calling this function, you can get a profile with adjusted string and
- * source tables where those unused strings and sources from the removed
- * threads have been removed.
+ * When a profile is uploaded, we allow removing parts of the uploaded data,
+ * for example by restricting to a time range (which removes samples and markers
+ * outside of the time range) or by removing entire threads.
+ *
+ * computeCompactedProfile makes it so that, once those threads / samples / markers
+ * are removed, we don't keep around any stacks / frames / strings / etc. which
+ * were only used by the removed threads / samples / markers.
  */
 export function computeCompactedProfile(
   profile: Profile
 ): CompactedProfileWithTranslationMaps {
+  const { shared, threads } = profile;
+  const tcs: TableCompactionStates = {
+    stackTable: new TableCompactionState(shared.stackTable.length),
+    frameTable: new TableCompactionState(shared.frameTable.length),
+    funcTable: new TableCompactionState(shared.funcTable.length),
+    resourceTable: new TableCompactionState(shared.resourceTable.length),
+    nativeSymbols: new TableCompactionState(shared.nativeSymbols.length),
+    sources: new TableCompactionState(shared.sources.length),
+    sourceLocationTable: new TableCompactionState(
+      shared.sourceLocationTable.length
+    ),
+    libs: new TableCompactionState(profile.libs.length),
+    stringArray: new TableCompactionState(shared.stringArray.length),
+  };
+
+  const stackTableDesc: TableDescription<RawStackTable> = {
+    frame: ColDesc.indexRefInt32(tcs.frameTable),
+    prefixOffset: ColDesc.selfPrefixOffset(),
+  };
+  const frameTableDesc: TableDescription<RawFrameTable> = {
+    flags: ColDesc.noRefTyped(Uint8Array),
+    address: ColDesc.noRefTyped(Uint32Array),
+    category: ColDesc.noRefTyped(Uint8Array),
+    subcategory: ColDesc.noRefTyped(
+      subcategoriesNeedSixteenBits(profile.meta.categories)
+        ? Uint16Array
+        : Uint8Array
+    ),
+    func: ColDesc.indexRefInt32(tcs.funcTable),
+    lib: ColDesc.indexRefInt32GatedByFlag(tcs.libs, FrameFlag.HasAddress),
+    nativeSymbol: ColDesc.indexRefInt32GatedByFlag(
+      tcs.nativeSymbols,
+      FrameFlag.HasNativeSymbol
+    ),
+    innerWindowID: ColDesc.noRefTyped(Float64Array),
+    line: ColDesc.noRefTyped(Int32Array),
+    column: ColDesc.noRefTyped(Int32Array),
+    originalLocation: ColDesc.indexRefInt32GatedByFlag(
+      tcs.sourceLocationTable,
+      FrameFlag.HasOriginalLocation
+    ),
+  };
+  const funcTableDesc: TableDescription<RawFuncTable> = {
+    flags: ColDesc.noRef(),
+    name: ColDesc.indexRefInt32(tcs.stringArray),
+    resource: ColDesc.indexRefInt32GatedByFlag(
+      tcs.resourceTable,
+      FuncFlag.HasResource
+    ),
+    source: ColDesc.indexRefInt32GatedByFlag(tcs.sources, FuncFlag.HasSource),
+    lineNumber: ColDesc.noRef(),
+    columnNumber: ColDesc.noRef(),
+    originalLocation: ColDesc.indexRefInt32GatedByFlag(
+      tcs.sourceLocationTable,
+      FuncFlag.HasOriginalLocation
+    ),
+  };
+  const sourceLocationTableDesc: TableDescription<SourceLocationTable> = {
+    source: ColDesc.indexRef(tcs.sources),
+    line: ColDesc.noRef(),
+    column: ColDesc.noRef(),
+  };
+  const resourceTableDesc: TableDescription<ResourceTable> = {
+    name: ColDesc.indexRef(tcs.stringArray),
+    host: ColDesc.indexRefOrNull(tcs.stringArray),
+    type: ColDesc.noRef(),
+  };
+  const nativeSymbolsDesc: TableDescription<RawNativeSymbolTable> = {
+    libIndex: ColDesc.indexRefInt32(tcs.libs),
+    address: ColDesc.noRefTyped(Uint32Array),
+    name: ColDesc.indexRefInt32(tcs.stringArray),
+    functionSize: ColDesc.noRefTyped(Int32Array),
+  };
+  const sourcesDesc: TableDescription<SourceTable> = {
+    id: ColDesc.noRef(),
+    filename: ColDesc.indexRef(tcs.stringArray),
+    startLine: ColDesc.noRef(),
+    startColumn: ColDesc.noRef(),
+    sourceMapURL: ColDesc.indexRefOrNull(tcs.stringArray),
+    content: ColDesc.noRef(),
+  };
+
+  // Step 1: Gather all references.
   const stringIndexMarkerFieldsByDataType =
     computeStringIndexMarkerFieldsByDataType(profile.meta.markerSchema);
-
-  // Step 1: Gather all references of strings.
-  const referencedStrings = _gatherStringReferencesInProfile(
-    profile,
-    stringIndexMarkerFieldsByDataType
-  );
-
-  // Step 2: Gather all references of sources.
-  const referencedSources = _gatherSourceReferencesInProfile(profile);
-
-  // Step 3: Adjust all tables to use new string and source indexes.
-  return _createProfileWithTranslatedIndexes(
-    profile,
-    referencedStrings,
-    referencedSources,
-    stringIndexMarkerFieldsByDataType
-  );
-}
-
-function _gatherStringReferencesInProfile(
-  profile: Profile,
-  stringIndexMarkerFieldsByDataType: Map<string, string[]>
-): Uint8Array {
-  const referencedStrings = new Uint8Array(profile.shared.stringArray.length);
-
-  for (const thread of profile.threads) {
-    _gatherStringReferencesInThread(
-      thread,
-      referencedStrings,
-      stringIndexMarkerFieldsByDataType,
-      profile.shared.sources ?? null
-    );
+  for (const thread of threads) {
+    _gatherReferencesInThread(thread, tcs, stringIndexMarkerFieldsByDataType);
   }
 
-  return referencedStrings;
-}
-
-function _gatherSourceReferencesInProfile(profile: Profile): Uint8Array {
-  const referencedSources = new Uint8Array(profile.shared.sources.length);
-
-  for (const thread of profile.threads) {
-    _gatherSourceReferencesInThread(thread, referencedSources);
-  }
-
-  return referencedSources;
-}
-
-function _gatherSourceReferencesInThread(
-  thread: RawThread,
-  referencedSources: Uint8Array
-) {
-  for (let i = 0; i < thread.funcTable.length; i++) {
-    const sourceIndex = thread.funcTable.source[i];
-    if (sourceIndex !== null) {
-      referencedSources[sourceIndex] = 1;
-    }
-  }
-}
-
-function _createProfileWithTranslatedIndexes(
-  profile: Profile,
-  referencedStrings: Uint8Array,
-  referencedSources: Uint8Array,
-  stringIndexMarkerFieldsByDataType: Map<string, string[]>
-): CompactedProfileWithTranslationMaps {
-  const { newStringArray, oldStringToNewStringPlusOne } =
-    _createCompactedStringArray(profile.shared.stringArray, referencedStrings);
-
-  const { newSources, oldSourceToNewSourcePlusOne } =
-    _createCompactedSourceTable(
-      profile.shared.sources,
-      referencedSources,
-      oldStringToNewStringPlusOne
-    );
-
-  const newThreads = profile.threads.map((thread) =>
-    _createThreadWithTranslatedIndexes(
-      thread,
-      oldStringToNewStringPlusOne,
-      oldSourceToNewSourcePlusOne,
-      stringIndexMarkerFieldsByDataType
-    )
+  // The order of the _markTableAndComputeTranslation calls is important!
+  // We only want to mark data that is (transitively) used by thread data.
+  // So, for example, we have to mark the funcTable before we mark the
+  // sources, so that, by the time we look at the sources, we already know
+  // which sources are (transitively) referenced.
+  _markTableAndComputeTranslation(
+    shared.stackTable,
+    tcs.stackTable,
+    stackTableDesc
   );
+  _markTableAndComputeTranslation(
+    shared.frameTable,
+    tcs.frameTable,
+    frameTableDesc
+  );
+  _markTableAndComputeTranslation(
+    shared.funcTable,
+    tcs.funcTable,
+    funcTableDesc
+  );
+  _markTableAndComputeTranslation(
+    shared.resourceTable,
+    tcs.resourceTable,
+    resourceTableDesc
+  );
+  _markTableAndComputeTranslation(
+    shared.sourceLocationTable,
+    tcs.sourceLocationTable,
+    sourceLocationTableDesc
+  );
+  _markTableAndComputeTranslation(
+    shared.nativeSymbols,
+    tcs.nativeSymbols,
+    nativeSymbolsDesc
+  );
+  _markTableAndComputeTranslation(shared.sources, tcs.sources, sourcesDesc);
+  tcs.stringArray.computeIndexTranslation();
+  tcs.libs.computeIndexTranslation();
 
+  // Step 2: Create new tables for everything, skipping unreferenced entries.
+  // The order of calls to _compactTable doesn't matter - we've already computed
+  // all the index mappings.
   const newShared: RawProfileSharedData = {
-    stringArray: newStringArray,
-    sources: newSources,
+    stackTable: _compactTable(
+      shared.stackTable,
+      tcs.stackTable,
+      stackTableDesc
+    ),
+    frameTable: _compactTable(
+      shared.frameTable,
+      tcs.frameTable,
+      frameTableDesc
+    ),
+    funcTable: _compactTable(shared.funcTable, tcs.funcTable, funcTableDesc),
+    resourceTable: _compactTable(
+      shared.resourceTable,
+      tcs.resourceTable,
+      resourceTableDesc
+    ),
+    nativeSymbols: _compactTable(
+      shared.nativeSymbols,
+      tcs.nativeSymbols,
+      nativeSymbolsDesc
+    ),
+    sources: _compactTable(shared.sources, tcs.sources, sourcesDesc),
+    sourceLocationTable: _compactTable(
+      shared.sourceLocationTable,
+      tcs.sourceLocationTable,
+      sourceLocationTableDesc
+    ),
+    stringArray: _createCompactedStringArray(shared.stringArray, tcs),
   };
 
   const newProfile: Profile = {
     ...profile,
+    libs: _createCompactedLibs(profile.libs, tcs),
     shared: newShared,
-    threads: newThreads,
+    threads: profile.threads.map((thread) =>
+      _createCompactedThread(thread, tcs, stringIndexMarkerFieldsByDataType)
+    ),
   };
 
-  return {
-    profile: newProfile,
-    oldStringToNewStringPlusOne,
-    oldSourceToNewSourcePlusOne,
+  const translationMaps: TranslationMaps = {
+    oldStackToNewStackPlusOne: tcs.stackTable.oldIndexToNewIndexPlusOne,
+    oldFrameToNewFramePlusOne: tcs.frameTable.oldIndexToNewIndexPlusOne,
+    oldFuncToNewFuncPlusOne: tcs.funcTable.oldIndexToNewIndexPlusOne,
+    oldResourceToNewResourcePlusOne:
+      tcs.resourceTable.oldIndexToNewIndexPlusOne,
+    oldNativeSymbolToNewNativeSymbolPlusOne:
+      tcs.nativeSymbols.oldIndexToNewIndexPlusOne,
+    oldSourceToNewSourcePlusOne: tcs.sources.oldIndexToNewIndexPlusOne,
+    oldStringToNewStringPlusOne: tcs.stringArray.oldIndexToNewIndexPlusOne,
+    oldLibToNewLibPlusOne: tcs.libs.oldIndexToNewIndexPlusOne,
   };
+  return { profile: newProfile, translationMaps };
 }
 
-function _gatherStringReferencesInThread(
-  thread: RawThread,
-  referencedStrings: Uint8Array,
-  stringIndexMarkerFieldsByDataType: Map<string, string[]>,
-  sources: SourceTable
+// --- Step 1: Marking ---
+
+function _markTableAndComputeTranslation<T>(
+  table: T,
+  thisTableCompactionState: TableCompactionState,
+  tableDesc: TableDescription<T>
 ) {
+  const { markBuffer } = thisTableCompactionState;
+  const keys = Object.keys(tableDesc) as Array<keyof typeof tableDesc>;
+
+  // First pass: propagate self-references. This must happen before the
+  // cross-table marking pass, so that ancestor rows are fully marked before
+  // we look up which rows of other tables they reference.
+  for (const key of keys) {
+    const desc = tableDesc[key];
+    if (desc.type === 'SELF_RELATIVE_PARENT') {
+      markSelfColumnPrefixOffset((table as any)[key], markBuffer);
+    }
+  }
+
+  // Second pass: mark rows in other tables referenced by marked rows.
+  for (const key of keys) {
+    const desc = tableDesc[key];
+    const col = (table as any)[key];
+    switch (desc.type) {
+      case 'INDEX_REF':
+      case 'INDEX_REF_INT32':
+        markColumn(col, markBuffer, desc.referencedTable.markBuffer);
+        break;
+      case 'INDEX_REF_INT32_GATED_BY_FLAG':
+        markColumnGatedByFlag(
+          col,
+          (table as any).flags,
+          desc.flagBit,
+          markBuffer,
+          desc.referencedTable.markBuffer
+        );
+        break;
+      case 'INDEX_REF_OR_NULL':
+        markColumnWithNullableFields(
+          col,
+          markBuffer,
+          desc.referencedTable.markBuffer
+        );
+        break;
+      case 'SELF_RELATIVE_PARENT':
+        break; // already handled in the first pass
+      case 'NO_REF':
+      case 'NO_REF_TYPED':
+        break;
+      default:
+        throw assertExhaustiveCheck(desc);
+    }
+  }
+
+  thisTableCompactionState.computeIndexTranslation();
+}
+
+function markColumn(
+  col: Array<number> | Int32Array<ArrayBuffer>,
+  shouldMark: BitSet,
+  markBuf: BitSet
+) {
+  // Polymorphic: indexing works the same on Int32Array as on number[], so the
+  // INDEX_REF and INDEX_REF_INT32 cases share this function.
+  for (let i = 0; i < col.length; i++) {
+    if (checkBit(shouldMark, i)) {
+      const val = col[i];
+      setBit(markBuf, val);
+    }
+  }
+}
+
+function markColumnWithNullableFields(
+  col: Array<number | null>,
+  shouldMark: BitSet,
+  markBuf: BitSet
+) {
+  for (let i = 0; i < col.length; i++) {
+    if (checkBit(shouldMark, i)) {
+      const val = col[i];
+      if (val !== null) {
+        setBit(markBuf, val);
+      }
+    }
+  }
+}
+
+// Self-referential columns must be iterated in reverse so that marking a
+// prefix propagates transitively: since prefix[i] < i is guaranteed, iterating
+// high-to-low means a newly marked row will still be visited.
+function markSelfColumnPrefixOffset(
+  col: Int32Array<ArrayBuffer>,
+  markBuf: BitSet
+) {
+  for (let i = col.length - 1; i >= 0; i--) {
+    if (checkBit(markBuf, i)) {
+      const offset = col[i];
+      if (offset !== 0) {
+        setBit(markBuf, i - offset);
+      }
+    }
+  }
+}
+
+function markColumnGatedByFlag(
+  col: Array<number> | Int32Array<ArrayBuffer>,
+  flagCol: Array<number> | Uint8Array<ArrayBuffer>,
+  flagBit: number,
+  shouldMark: BitSet,
+  markBuf: BitSet
+) {
+  for (let i = 0; i < col.length; i++) {
+    if (checkBit(shouldMark, i) && (flagCol[i] & flagBit) !== 0) {
+      setBit(markBuf, col[i]);
+    }
+  }
+}
+
+function _gatherReferencesInThread(
+  thread: RawThread,
+  tcs: TableCompactionStates,
+  stringIndexMarkerFieldsByDataType: Map<string, string[]>
+) {
+  _gatherReferencesInStackCol(thread.samples.stack, tcs);
+  if (thread.jsAllocations) {
+    _gatherReferencesInStackCol(thread.jsAllocations.stack, tcs);
+  }
+  if (thread.nativeAllocations) {
+    _gatherReferencesInStackCol(thread.nativeAllocations.stack, tcs);
+  }
   _gatherReferencesInMarkers(
     thread.markers,
-    referencedStrings,
+    tcs,
     stringIndexMarkerFieldsByDataType
   );
-
-  _gatherReferencesInFuncTable(thread.funcTable, referencedStrings, sources);
-  _gatherReferencesInResourceTable(thread.resourceTable, referencedStrings);
-  _gatherReferencesInNativeSymbols(thread.nativeSymbols, referencedStrings);
 }
 
-function _createThreadWithTranslatedIndexes(
-  thread: RawThread,
-  oldStringToNewStringPlusOne: Int32Array,
-  oldSourceToNewSourcePlusOne: Int32Array,
-  stringIndexMarkerFieldsByDataType: Map<string, string[]>
-): RawThread {
-  const newNativeSymbols = _createNativeSymbolsWithTranslatedStringIndexes(
-    thread.nativeSymbols,
-    oldStringToNewStringPlusOne
-  );
-  const newResourceTable = _createResourceTableWithTranslatedStringIndexes(
-    thread.resourceTable,
-    oldStringToNewStringPlusOne
-  );
-  const newFuncTable = _createFuncTableWithTranslatedIndexes(
-    thread.funcTable,
-    oldStringToNewStringPlusOne,
-    oldSourceToNewSourcePlusOne
-  );
-  const newMarkers = _createMarkersWithTranslatedStringIndexes(
-    thread.markers,
-    oldStringToNewStringPlusOne,
-    stringIndexMarkerFieldsByDataType
-  );
-  const newThread: RawThread = {
-    ...thread,
-    nativeSymbols: newNativeSymbols,
-    resourceTable: newResourceTable,
-    funcTable: newFuncTable,
-    markers: newMarkers,
-  };
-
-  return newThread;
+function _gatherReferencesInStackCol(
+  stackCol: Array<IndexIntoStackTable | null>,
+  tcs: TableCompactionStates
+) {
+  for (let i = 0; i < stackCol.length; i++) {
+    const stack = stackCol[i];
+    if (stack !== null) {
+      setBit(tcs.stackTable.markBuffer, stack);
+    }
+  }
 }
 
 function _gatherReferencesInMarkers(
   markers: RawMarkerTable,
-  referencedStrings: Uint8Array,
+  tcs: TableCompactionStates,
   stringIndexMarkerFieldsByDataType: Map<string, string[]>
 ) {
+  const stacks = tcs.stackTable.markBuffer;
+  const strings = tcs.stringArray.markBuffer;
   for (let i = 0; i < markers.length; i++) {
-    referencedStrings[markers.name[i]] = 1;
+    setBit(strings, markers.name[i]);
 
     const data = markers.data[i];
     if (!data) {
       continue;
+    }
+
+    if ('cause' in data && data.cause && data.cause.stack !== null) {
+      setBit(stacks, data.cause.stack);
     }
 
     if (data.type) {
@@ -212,7 +544,7 @@ function _gatherReferencesInMarkers(
         for (const fieldKey of stringIndexMarkerFields) {
           const stringIndex = (data as any)[fieldKey];
           if (typeof stringIndex === 'number') {
-            referencedStrings[stringIndex] = 1;
+            setBit(strings, stringIndex);
           }
         }
       }
@@ -220,15 +552,262 @@ function _gatherReferencesInMarkers(
   }
 }
 
-function _createMarkersWithTranslatedStringIndexes(
+// --- Step 2: Compacting ---
+
+// Compact a single table with the help of a table description.
+function _compactTable<T extends { length: number }>(
+  oldTable: T,
+  thisTableCompactionState: TableCompactionState,
+  tableDesc: TableDescription<T>
+): T {
+  const { markBuffer } = thisTableCompactionState;
+  const newLength = ensureExists(thisTableCompactionState.newLength);
+  const result: any = { length: newLength };
+  for (const key of Object.keys(tableDesc) as Array<keyof typeof tableDesc>) {
+    const desc = tableDesc[key];
+    const oldCol = (oldTable as any)[key];
+    switch (desc.type) {
+      case 'INDEX_REF':
+        result[key] = _compactColIndex(
+          oldCol,
+          markBuffer,
+          desc.referencedTable.oldIndexToNewIndexPlusOne,
+          newLength
+        );
+        break;
+      case 'INDEX_REF_INT32':
+        result[key] = _compactColIndexInt32(
+          oldCol,
+          markBuffer,
+          desc.referencedTable.oldIndexToNewIndexPlusOne,
+          newLength
+        );
+        break;
+      case 'INDEX_REF_INT32_GATED_BY_FLAG':
+        result[key] = _compactColIndexInt32GatedByFlag(
+          oldCol,
+          (oldTable as any).flags,
+          desc.flagBit,
+          markBuffer,
+          desc.referencedTable.oldIndexToNewIndexPlusOne,
+          newLength
+        );
+        break;
+      case 'INDEX_REF_OR_NULL':
+        result[key] = _compactColIndexOrNull(
+          oldCol,
+          markBuffer,
+          desc.referencedTable.oldIndexToNewIndexPlusOne,
+          newLength
+        );
+        break;
+      case 'SELF_RELATIVE_PARENT':
+        result[key] = _compactColSelfPrefixOffset(
+          oldCol,
+          markBuffer,
+          thisTableCompactionState.oldIndexToNewIndexPlusOne,
+          newLength
+        );
+        break;
+      case 'NO_REF':
+        result[key] = _compactColCopy(oldCol, markBuffer, newLength);
+        break;
+      case 'NO_REF_TYPED':
+        result[key] = _compactColCopyTyped(
+          oldCol,
+          desc.arrayConstructor,
+          markBuffer,
+          newLength
+        );
+        break;
+      default:
+        throw assertExhaustiveCheck(desc);
+    }
+  }
+  return result;
+}
+
+function _compactColCopy<E>(
+  oldCol: E[],
+  markBuffer: BitSet,
+  newLength: number
+): E[] {
+  const newCol: E[] = new Array(newLength);
+  let newIndex = 0;
+  for (let i = 0; i < oldCol.length; i++) {
+    if (checkBit(markBuffer, i)) {
+      newCol[newIndex++] = oldCol[i];
+    }
+  }
+  return newCol;
+}
+
+function _compactColCopyTyped(
+  oldCol: ArrayLike<number>,
+  arrayConstructor: NumericArrayConstructor,
+  markBuffer: BitSet,
+  newLength: number
+) {
+  const newCol = new arrayConstructor(newLength);
+  let newIndex = 0;
+  for (let i = 0; i < oldCol.length; i++) {
+    if (checkBit(markBuffer, i)) {
+      newCol[newIndex++] = oldCol[i];
+    }
+  }
+  return newCol;
+}
+
+function _compactColIndex(
+  oldCol: number[],
+  markBuffer: BitSet,
+  oldIndexToNewIndexPlusOne: Int32Array,
+  newLength: number
+): number[] {
+  const newCol: number[] = new Array(newLength);
+  let newIndex = 0;
+  for (let i = 0; i < oldCol.length; i++) {
+    if (checkBit(markBuffer, i)) {
+      newCol[newIndex++] = oldIndexToNewIndexPlusOne[oldCol[i]] - 1;
+    }
+  }
+  return newCol;
+}
+
+function _compactColIndexInt32(
+  oldCol: Int32Array<ArrayBuffer>,
+  markBuffer: BitSet,
+  oldIndexToNewIndexPlusOne: Int32Array,
+  newLength: number
+): Int32Array<ArrayBuffer> {
+  const newCol = new Int32Array(newLength);
+  let newIndex = 0;
+  for (let i = 0; i < oldCol.length; i++) {
+    if (checkBit(markBuffer, i)) {
+      newCol[newIndex++] = oldIndexToNewIndexPlusOne[oldCol[i]] - 1;
+    }
+  }
+  return newCol;
+}
+
+function _compactColIndexInt32GatedByFlag(
+  oldCol: number[] | Int32Array<ArrayBuffer>,
+  flagCol: number[] | Uint8Array<ArrayBuffer>,
+  flagBit: number,
+  markBuffer: BitSet,
+  oldIndexToNewIndexPlusOne: Int32Array,
+  newLength: number
+): Int32Array<ArrayBuffer> {
+  const newCol = new Int32Array(newLength);
+  let newIndex = 0;
+  for (let i = 0; i < oldCol.length; i++) {
+    if (checkBit(markBuffer, i)) {
+      newCol[newIndex++] =
+        (flagCol[i] & flagBit) !== 0
+          ? oldIndexToNewIndexPlusOne[oldCol[i]] - 1
+          : 0;
+    }
+  }
+  return newCol;
+}
+
+function _compactColIndexOrNull(
+  oldCol: (number | null)[],
+  markBuffer: BitSet,
+  oldIndexToNewIndexPlusOne: Int32Array,
+  newLength: number
+): (number | null)[] {
+  const newCol: (number | null)[] = new Array(newLength);
+  let newIndex = 0;
+  for (let i = 0; i < oldCol.length; i++) {
+    if (checkBit(markBuffer, i)) {
+      const val = oldCol[i];
+      newCol[newIndex++] =
+        val !== null ? oldIndexToNewIndexPlusOne[val] - 1 : null;
+    }
+  }
+  return newCol;
+}
+
+function _compactColSelfPrefixOffset(
+  oldCol: Int32Array<ArrayBuffer>,
+  markBuffer: BitSet,
+  oldIndexToNewIndexPlusOne: Int32Array,
+  newLength: number
+): Int32Array<ArrayBuffer> {
+  const newCol = new Int32Array(newLength);
+  let newIndex = 0;
+  for (let i = 0; i < oldCol.length; i++) {
+    if (checkBit(markBuffer, i)) {
+      const offset = oldCol[i];
+      if (offset === 0) {
+        newCol[newIndex] = 0;
+      } else {
+        const newParent = oldIndexToNewIndexPlusOne[i - offset] - 1;
+        newCol[newIndex] = newIndex - newParent;
+      }
+      newIndex++;
+    }
+  }
+  return newCol;
+}
+
+function _createCompactedThread(
+  thread: RawThread,
+  tcs: TableCompactionStates,
+  stringIndexMarkerFieldsByDataType: Map<string, string[]>
+): RawThread {
+  return {
+    ...thread,
+    samples: {
+      ...thread.samples,
+      stack: _translateStackCol(thread.samples.stack, tcs),
+    },
+    jsAllocations: thread.jsAllocations
+      ? {
+          ...thread.jsAllocations,
+          stack: _translateStackCol(thread.jsAllocations.stack, tcs),
+        }
+      : undefined,
+    nativeAllocations: thread.nativeAllocations
+      ? {
+          ...thread.nativeAllocations,
+          stack: _translateStackCol(thread.nativeAllocations.stack, tcs),
+        }
+      : undefined,
+    markers: _createCompactedMarkers(
+      thread.markers,
+      tcs,
+      stringIndexMarkerFieldsByDataType
+    ),
+  };
+}
+
+function _translateStackCol(
+  stackCol: Array<IndexIntoStackTable | null>,
+  tcs: TableCompactionStates
+): Array<IndexIntoStackTable | null> {
+  const { oldIndexToNewIndexPlusOne } = tcs.stackTable;
+  const newStackCol = stackCol.slice();
+  for (let i = 0; i < stackCol.length; i++) {
+    const stack = stackCol[i];
+    newStackCol[i] =
+      stack !== null ? oldIndexToNewIndexPlusOne[stack] - 1 : null;
+  }
+  return newStackCol;
+}
+
+function _createCompactedMarkers(
   markers: RawMarkerTable,
-  oldStringToNewStringPlusOne: Int32Array,
+  tcs: TableCompactionStates,
   stringIndexMarkerFieldsByDataType: Map<string, string[]>
 ): RawMarkerTable {
+  const stacks = tcs.stackTable.oldIndexToNewIndexPlusOne;
+  const strings = tcs.stringArray.oldIndexToNewIndexPlusOne;
   const newDataCol = markers.data.slice();
   const newNameCol = markers.name.slice();
   for (let i = 0; i < markers.length; i++) {
-    newNameCol[i] = oldStringToNewStringPlusOne[markers.name[i]] - 1;
+    newNameCol[i] = strings[markers.name[i]] - 1;
 
     const data = markers.data[i];
     if (!data) {
@@ -236,6 +815,19 @@ function _createMarkersWithTranslatedStringIndexes(
     }
 
     let newData = data;
+    if ('cause' in newData && newData.cause) {
+      const stack = newData.cause.stack;
+      if (stack !== null) {
+        newData = {
+          ...newData,
+          cause: {
+            ...newData.cause,
+            stack: stacks[stack] - 1,
+          },
+        };
+      }
+    }
+
     if (data.type) {
       const stringIndexMarkerFields = stringIndexMarkerFieldsByDataType.get(
         data.type
@@ -246,7 +838,7 @@ function _createMarkersWithTranslatedStringIndexes(
           if (typeof stringIndex === 'number') {
             newData = {
               ...newData,
-              [fieldKey]: oldStringToNewStringPlusOne[stringIndex] - 1,
+              [fieldKey]: strings[stringIndex] - 1,
             };
           }
         }
@@ -263,169 +855,21 @@ function _createMarkersWithTranslatedStringIndexes(
   };
 }
 
-function _gatherReferencesInFuncTable(
-  funcTable: FuncTable,
-  referencedStrings: Uint8Array,
-  sources: SourceTable
-) {
-  for (let i = 0; i < funcTable.length; i++) {
-    referencedStrings[funcTable.name[i]] = 1;
-
-    const sourceIndex = funcTable.source[i];
-    if (sourceIndex !== null) {
-      const urlIndex = sources.filename[sourceIndex];
-      referencedStrings[urlIndex] = 1;
-    }
-  }
-}
-
-function _createFuncTableWithTranslatedIndexes(
-  funcTable: FuncTable,
-  oldStringToNewStringPlusOne: Int32Array,
-  oldSourceToNewSourcePlusOne: Int32Array
-): FuncTable {
-  const newFuncTableNameCol = funcTable.name.slice();
-  const newFuncTableSourceCol = funcTable.source.slice();
-  for (let i = 0; i < funcTable.length; i++) {
-    const name = funcTable.name[i];
-    newFuncTableNameCol[i] = oldStringToNewStringPlusOne[name] - 1;
-
-    // Translate source indexes to new compacted source table.
-    const sourceIndex = funcTable.source[i];
-    if (sourceIndex !== null) {
-      const newSourceIndexPlusOne = oldSourceToNewSourcePlusOne[sourceIndex];
-      newFuncTableSourceCol[i] = newSourceIndexPlusOne - 1;
-    }
-  }
-
-  const newFuncTable = {
-    ...funcTable,
-    name: newFuncTableNameCol,
-    source: newFuncTableSourceCol,
-  };
-  return newFuncTable;
-}
-
-function _gatherReferencesInResourceTable(
-  resourceTable: ResourceTable,
-  referencedStrings: Uint8Array
-) {
-  for (let i = 0; i < resourceTable.length; i++) {
-    referencedStrings[resourceTable.name[i]] = 1;
-
-    const host = resourceTable.host[i];
-    if (host !== null) {
-      referencedStrings[host] = 1;
-    }
-  }
-}
-
-function _createResourceTableWithTranslatedStringIndexes(
-  resourceTable: ResourceTable,
-  oldStringToNewStringPlusOne: Int32Array
-): ResourceTable {
-  const newResourceTableNameCol = resourceTable.name.slice();
-  const newResourceTableHostCol = resourceTable.host.slice();
-  for (let i = 0; i < resourceTable.length; i++) {
-    const name = newResourceTableNameCol[i];
-    newResourceTableNameCol[i] = oldStringToNewStringPlusOne[name] - 1;
-
-    const host = newResourceTableHostCol[i];
-    newResourceTableHostCol[i] =
-      host !== null ? oldStringToNewStringPlusOne[host] - 1 : null;
-  }
-
-  const newResourceTable = {
-    ...resourceTable,
-    name: newResourceTableNameCol,
-    host: newResourceTableHostCol,
-  };
-  return newResourceTable;
-}
-
-function _gatherReferencesInNativeSymbols(
-  nativeSymbols: NativeSymbolTable,
-  referencedStrings: Uint8Array
-) {
-  for (let i = 0; i < nativeSymbols.length; i++) {
-    referencedStrings[nativeSymbols.name[i]] = 1;
-  }
-}
-
-function _createNativeSymbolsWithTranslatedStringIndexes(
-  nativeSymbols: NativeSymbolTable,
-  oldStringToNewStringPlusOne: Int32Array
-): NativeSymbolTable {
-  const newNativeSymbolsNameCol = nativeSymbols.name.slice();
-  for (let i = 0; i < nativeSymbols.length; i++) {
-    newNativeSymbolsNameCol[i] =
-      oldStringToNewStringPlusOne[newNativeSymbolsNameCol[i]] - 1;
-  }
-
-  const newNativeSymbols = {
-    ...nativeSymbols,
-    name: newNativeSymbolsNameCol,
-  };
-  return newNativeSymbols;
-}
-
 function _createCompactedStringArray(
   stringArray: string[],
-  referencedStrings: Uint8Array
-): { newStringArray: string[]; oldStringToNewStringPlusOne: Int32Array } {
-  const oldStringToNewStringPlusOne = new Int32Array(stringArray.length);
-  let nextIndex = 0;
-  const newStringArray = [];
-  for (let i = 0; i < stringArray.length; i++) {
-    if (referencedStrings[i] === 0) {
-      continue;
-    }
-
-    const newIndex = nextIndex++;
-    newStringArray[newIndex] = stringArray[i];
-    oldStringToNewStringPlusOne[i] = newIndex + 1;
-  }
-
-  return { newStringArray, oldStringToNewStringPlusOne };
+  tcs: TableCompactionStates
+): string[] {
+  return _compactColCopy(
+    stringArray,
+    tcs.stringArray.markBuffer,
+    ensureExists(tcs.stringArray.newLength)
+  );
 }
 
-function _createCompactedSourceTable(
-  sourceTable: SourceTable,
-  referencedSources: Uint8Array,
-  oldStringToNewStringPlusOne: Int32Array
-): { newSources: SourceTable; oldSourceToNewSourcePlusOne: Int32Array } {
-  const oldSourceToNewSourcePlusOne = new Int32Array(sourceTable.length);
-  let nextIndex = 0;
-  const newUuid = [];
-  const newFilename = [];
-
-  for (let i = 0; i < sourceTable.length; i++) {
-    if (referencedSources[i] === 0) {
-      continue;
-    }
-
-    const newIndex = nextIndex++;
-    newUuid[newIndex] = sourceTable.uuid[i];
-
-    // Translate the filename string index
-    const oldFilenameIndex = sourceTable.filename[i];
-    const newFilenameIndexPlusOne =
-      oldStringToNewStringPlusOne[oldFilenameIndex];
-    if (newFilenameIndexPlusOne === 0) {
-      throw new Error(
-        `String index ${oldFilenameIndex} was not found in the translation map`
-      );
-    }
-    newFilename[newIndex] = newFilenameIndexPlusOne - 1;
-
-    oldSourceToNewSourcePlusOne[i] = newIndex + 1;
-  }
-
-  const newSources: SourceTable = {
-    length: nextIndex,
-    uuid: newUuid,
-    filename: newFilename,
-  };
-
-  return { newSources, oldSourceToNewSourcePlusOne };
+function _createCompactedLibs(libs: Lib[], tcs: TableCompactionStates): Lib[] {
+  return _compactColCopy(
+    libs,
+    tcs.libs.markBuffer,
+    ensureExists(tcs.libs.newLength)
+  );
 }

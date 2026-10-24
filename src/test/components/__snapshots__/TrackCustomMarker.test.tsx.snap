@@ -30,12 +30,6 @@ exports[`TrackCustomMarker has a tooltip that matches the snapshot 1`] = `
         >
           Marker
         </span>
-        <button
-          aria-label="Only show markers matching: “⁨Marker⁩”"
-          class="tooltipTitleFilterButton"
-          title="Only show markers matching: “⁨Marker⁩”"
-          type="button"
-        />
       </div>
     </div>
   </div>
@@ -240,14 +234,18 @@ exports[`TrackCustomMarker matches the component snapshot 1`] = `
   style="height: 25px; --graph-height: 25px;"
 >
   <div
-    class="timelineTrackCustomMarkerGraph"
+    style="display: contents;"
   >
-    <div>
-      <canvas
-        class="timelineTrackCustomMarkerCanvas"
-        height="25"
-        width="80"
-      />
+    <div
+      class="timelineTrackCustomMarkerGraph"
+    >
+      <div>
+        <canvas
+          class="timelineTrackCustomMarkerCanvas"
+          height="25"
+          width="80"
+        />
+      </div>
     </div>
   </div>
 </div>

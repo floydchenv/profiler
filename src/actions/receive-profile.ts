@@ -2,6 +2,13 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 import { oneLine } from 'common-tags';
+import {
+  fetchProfile,
+  getProfileUrlForHash,
+  type ProfileOrZip,
+  deduceContentType,
+  extractJsonFromArrayBuffer,
+} from 'firefox-profiler/utils/profile-fetch';
 import queryString from 'query-string';
 import type JSZip from 'jszip';
 import {
@@ -10,17 +17,18 @@ import {
   processGeckoProfile,
   unserializeProfileOfArbitraryFormat,
 } from 'firefox-profiler/profile-logic/process-profile';
-import { SymbolStore } from 'firefox-profiler/profile-logic/symbol-store';
+import {
+  readSymbolsFromSymbolTable,
+  SymbolStore,
+} from 'firefox-profiler/profile-logic/symbol-store';
 import {
   symbolicateProfile,
   applySymbolicationSteps,
 } from 'firefox-profiler/profile-logic/symbolication';
 import * as MozillaSymbolicationAPI from 'firefox-profiler/profile-logic/mozilla-symbolication-api';
 import { mergeProfilesForDiffing } from 'firefox-profiler/profile-logic/merge-compare';
-import { decompress, isGzip } from 'firefox-profiler/utils/gz';
 import { expandUrl } from 'firefox-profiler/utils/shorten-url';
 import { TemporaryError } from 'firefox-profiler/utils/errors';
-import { isLocalURL } from 'firefox-profiler/utils/url';
 import {
   getSelectedThreadIndexesOrNull,
   getGlobalTrackOrder,
@@ -64,12 +72,14 @@ import {
 import { setDataSource } from './profile-view';
 import { fatalError } from './errors';
 import { batchLoadDataUrlIcons } from './icons';
-import { GOOGLE_STORAGE_BUCKET } from 'firefox-profiler/app-logic/constants';
 import {
   determineTimelineType,
   hasUsefulSamples,
 } from 'firefox-profiler/profile-logic/profile-data';
+import { doSourceMapSymbolication } from './source-map-symbolication';
+import type { SourceMapSymbolicationResult } from './source-map-symbolication';
 
+import type { SourceMap } from 'firefox-profiler/profile-logic/source-maps/store';
 import type {
   RequestedLib,
   ImplementationFilter,
@@ -82,19 +92,25 @@ import type {
   TabID,
   PageList,
   MixedObject,
+  IndexIntoSourceTable,
 } from 'firefox-profiler/types';
 
-import type {
-  FuncToFuncsMap,
-  SymbolicationStepInfo,
-} from '../profile-logic/symbolication';
+import type { SymbolicationStepInfo } from '../profile-logic/symbolication';
 import { assertExhaustiveCheck } from '../utils/types';
 import { bytesToBase64DataUrl } from 'firefox-profiler/utils/base64';
 import type {
   BrowserConnection,
   BrowserConnectionStatus,
 } from '../app-logic/browser-connection';
-import type { LibSymbolicationRequest } from '../profile-logic/symbol-store';
+import type {
+  AddressResult,
+  LibSymbolicationRequest,
+  LibSymbolicationResponse,
+  SymbolProvider,
+} from '../profile-logic/symbol-store';
+import type { SymbolTableAsTuple } from 'firefox-profiler/profile-logic/symbol-store-db';
+import SymbolStoreDB from 'firefox-profiler/profile-logic/symbol-store-db';
+import type { ProfileUpgradeInfo } from 'firefox-profiler/profile-logic/processed-profile-versioning';
 
 /**
  * This file collects all the actions that are used for receiving the profile in the
@@ -233,7 +249,29 @@ export function finalizeProfileView(
       }
     }
 
-    await Promise.all([faviconsPromise, symbolicationPromise]);
+    // Fetch source maps for all JS sources with a sourceMapURL, then run the
+    // source-map worker. Runs fully in parallel with native symbolication:
+    // native only touches funcs/frames belonging to library resources (JS
+    // funcs aren't in those sets), and the JS apply step reads current
+    // shared state at dispatch time so it composes with whatever native
+    // has committed by then. Requires WebChannel version 7+.
+    let sourceMapSymbolicationPromise: Promise<SourceMapSymbolicationResult> | null =
+      null;
+    if (browserConnection !== null && browserConnection.supportsGetSourceMap) {
+      sourceMapSymbolicationPromise = doResolveSourceMaps(
+        profile,
+        browserConnection,
+        dispatch
+      ).then(({ resolvedSourceMaps, compiledSources }) =>
+        dispatch(doSourceMapSymbolication(resolvedSourceMaps, compiledSources))
+      );
+    }
+
+    await Promise.all([
+      faviconsPromise,
+      symbolicationPromise,
+      sourceMapSymbolicationPromise,
+    ]);
   };
 }
 
@@ -337,7 +375,7 @@ export function finalizeFullProfileView(
         const thread = profile.threads[threadIndex];
         const { samples, jsAllocations, nativeAllocations } = thread;
         hasSamples = [samples, jsAllocations, nativeAllocations].some((table) =>
-          hasUsefulSamples(table?.stack, thread, profile.shared)
+          hasUsefulSamples(table?.stack, profile.shared)
         );
         if (hasSamples) {
           break;
@@ -446,28 +484,20 @@ export function doneSymbolicating(): Action {
 // reach the screen because it would be invalidated by the next symbolication update.
 // So we queue up symbolication steps and run the update from requestIdleCallback.
 export function bulkProcessSymbolicationSteps(
-  symbolicationStepsPerThread: Map<ThreadIndex, SymbolicationStepInfo[]>
+  symbolicationSteps: SymbolicationStepInfo[]
 ): ThunkAction<void> {
   return (dispatch, getState) => {
     const { threads, shared } = getProfile(getState());
-    const oldFuncToNewFuncsMaps: Map<ThreadIndex, FuncToFuncsMap> = new Map();
-    const symbolicatedThreads = threads.map((oldThread, threadIndex) => {
-      const symbolicationSteps = symbolicationStepsPerThread.get(threadIndex);
-      if (symbolicationSteps === undefined) {
-        return oldThread;
-      }
-      const { thread, oldFuncToNewFuncsMap } = applySymbolicationSteps(
-        oldThread,
-        shared,
-        symbolicationSteps
-      );
-      oldFuncToNewFuncsMaps.set(threadIndex, oldFuncToNewFuncsMap);
-      return thread;
-    });
+    const {
+      threads: symbolicatedThreads,
+      shared: symbolicatedShared,
+      oldFuncToNewFuncsMap,
+    } = applySymbolicationSteps(threads, shared, symbolicationSteps);
     dispatch({
       type: 'BULK_SYMBOLICATION',
-      oldFuncToNewFuncsMaps,
+      oldFuncToNewFuncsMap,
       symbolicatedThreads,
+      symbolicatedShared,
     });
   };
 }
@@ -489,12 +519,12 @@ if (typeof window === 'object' && window.requestIdleCallback) {
 // Queues up symbolication steps and bulk-processes them from requestIdleCallback,
 // in order to improve UI responsiveness during symbolication.
 class SymbolicationStepQueue {
-  _updates: Map<ThreadIndex, SymbolicationStepInfo[]>;
+  _updates: SymbolicationStepInfo[];
   _updateObservers: Array<() => void>;
   _requestedUpdate: boolean;
 
   constructor() {
-    this._updates = new Map();
+    this._updates = [];
     this._updateObservers = [];
     this._requestedUpdate = false;
   }
@@ -512,7 +542,7 @@ class SymbolicationStepQueue {
   _dispatchUpdate(dispatch: Dispatch) {
     const updates = this._updates;
     const observers = this._updateObservers;
-    this._updates = new Map();
+    this._updates = [];
     this._updateObservers = [];
     this._requestedUpdate = false;
 
@@ -525,17 +555,11 @@ class SymbolicationStepQueue {
 
   enqueueSingleSymbolicationStep(
     dispatch: Dispatch,
-    threadIndex: ThreadIndex,
     symbolicationStepInfo: SymbolicationStepInfo,
     completionHandler: () => void
   ) {
     this._scheduleUpdate(dispatch);
-    let threadSteps = this._updates.get(threadIndex);
-    if (threadSteps === undefined) {
-      threadSteps = [];
-      this._updates.set(threadIndex, threadSteps);
-    }
-    threadSteps.push(symbolicationStepInfo);
+    this._updates.push(symbolicationStepInfo);
     this._updateObservers.push(completionHandler);
   }
 }
@@ -553,7 +577,7 @@ async function _unpackGeckoProfileFromBrowser(
   // global. This happens especially with tests but could happen in the future
   // in Firefox too.
   if (Object.prototype.toString.call(profile) === '[object ArrayBuffer]') {
-    return _extractJsonFromArrayBuffer(profile as ArrayBuffer);
+    return extractJsonFromArrayBuffer(profile as ArrayBuffer);
   }
   return profile;
 }
@@ -563,19 +587,56 @@ function getSymbolStore(
   symbolServerUrl: string,
   browserConnection: BrowserConnection | null
 ): SymbolStore | null {
-  if (!window.indexedDB) {
-    // We could be running in a test environment with no indexedDB support. Do not
-    // return a symbol store in this case.
+  if (typeof window === 'undefined' || !window.indexedDB) {
+    // We could be running in a test environment or Node.js with no indexedDB support.
+    // Do not return a symbol store in this case.
     return null;
   }
 
-  async function requestSymbolsWithCallback(
+  // Note, the database name still references the old project name, "perf.html". It was
+  // left the same as to not invalidate user's information.
+  const symbolProvider = new RegularSymbolProvider(
+    'perf-html-async-storage',
+    dispatch,
+    symbolServerUrl,
+    browserConnection
+  );
+  return new SymbolStore(symbolProvider);
+}
+
+type DemangleFunction = (name: string) => string;
+
+/**
+ * The regular implementation of the SymbolProvider interface: Symbols are requested
+ * from a server via fetch, and from the browser via a BrowserConnection (if present).
+ * State changes are notified via redux actions to the provided `dispatch` function.
+ */
+class RegularSymbolProvider implements SymbolProvider {
+  _dispatch: Dispatch;
+  _symbolServerUrl: string;
+  _browserConnection: BrowserConnection | null;
+  _symbolDb: SymbolStoreDB;
+  _demangleCallback: DemangleFunction | null = null;
+
+  constructor(
+    dbNamePrefix: string,
+    dispatch: Dispatch,
+    symbolServerUrl: string,
+    browserConnection: BrowserConnection | null
+  ) {
+    this._dispatch = dispatch;
+    this._symbolServerUrl = symbolServerUrl;
+    this._browserConnection = browserConnection;
+    this._symbolDb = new SymbolStoreDB(`${dbNamePrefix}-symbol-tables`);
+  }
+
+  async _makeSymbolicationAPIRequestWithCallback(
     symbolSupplierName: string,
     requests: LibSymbolicationRequest[],
     callback: (path: string, requestJson: string) => Promise<unknown>
   ) {
     for (const { lib } of requests) {
-      dispatch(requestingSymbolTable(lib));
+      this._dispatch(requestingSymbolTable(lib));
     }
     try {
       return await MozillaSymbolicationAPI.requestSymbols(
@@ -589,73 +650,159 @@ function getSymbolStore(
       );
     } finally {
       for (const { lib } of requests) {
-        dispatch(receivedSymbolTableReply(lib));
+        this._dispatch(receivedSymbolTableReply(lib));
       }
     }
   }
 
-  // Note, the database name still references the old project name, "perf.html". It was
-  // left the same as to not invalidate user's information.
-  const symbolStore = new SymbolStore('perf-html-async-storage', {
-    requestSymbolsFromServer: (requests) =>
-      requestSymbolsWithCallback(
-        'symbol server',
-        requests,
-        async (path, json) => {
-          const response = await fetch(symbolServerUrl + path, {
-            body: json,
-            method: 'POST',
-            mode: 'cors',
-            // Use a profiler-specific user agent, so that the symbolication server knows
-            // what's making this request.
-            headers: new Headers({
-              'User-Agent': `FirefoxProfiler/1.0 (+${location.origin})`,
-            }),
-          });
-          return response.json();
-        }
-      ),
-
-    requestSymbolsFromBrowser: async (requests) => {
-      if (browserConnection === null) {
-        throw new Error(
-          'No connection to the browser, cannot run querySymbolicationApi'
-        );
+  requestSymbolsFromServer(
+    requests: LibSymbolicationRequest[]
+  ): Promise<LibSymbolicationResponse[]> {
+    return this._makeSymbolicationAPIRequestWithCallback(
+      'symbol server',
+      requests,
+      async (path, json) => {
+        const response = await fetch(this._symbolServerUrl + path, {
+          body: json,
+          method: 'POST',
+          mode: 'cors',
+          // Use a profiler-specific user agent, so that the symbolication server knows
+          // what's making this request.
+          headers: new Headers({
+            'User-Agent': `FirefoxProfiler/1.0 (+${location.origin})`,
+          }),
+        });
+        return response.json();
       }
+    );
+  }
 
-      const bc = browserConnection;
-      return requestSymbolsWithCallback(
-        'browser',
-        requests,
-        async (path, json) =>
-          JSON.parse(await bc.querySymbolicationApi(path, json))
+  async requestSymbolsFromBrowser(
+    requests: LibSymbolicationRequest[]
+  ): Promise<LibSymbolicationResponse[]> {
+    if (this._browserConnection === null) {
+      throw new Error(
+        'No connection to the browser, cannot run querySymbolicationApi'
       );
-    },
+    }
 
-    requestSymbolTableFromBrowser: async (lib) => {
-      if (browserConnection === null) {
-        throw new Error(
-          'No connection to the browser, cannot obtain symbol tables'
-        );
-      }
+    const bc = this._browserConnection;
+    return this._makeSymbolicationAPIRequestWithCallback(
+      'browser',
+      requests,
+      async (path, json) =>
+        JSON.parse(await bc.querySymbolicationApi(path, json))
+    );
+  }
 
-      const { debugName, breakpadId } = lib;
-      dispatch(requestingSymbolTable(lib));
-      try {
-        const symbolTable = await browserConnection.getSymbolTable(
-          debugName,
-          breakpadId
-        );
-        dispatch(receivedSymbolTableReply(lib));
-        return symbolTable;
-      } catch (error) {
-        dispatch(receivedSymbolTableReply(lib));
-        throw error;
-      }
-    },
-  });
+  /**
+   * This function returns a function that can demangle function name using a
+   * WebAssembly module, but falls back on the identity function if the
+   * WebAssembly module isn't available for some reason.
+   */
+  async _createDemangleCallback(): Promise<DemangleFunction> {
+    try {
+      // When this module imports some WebAssembly module, the bundler's mechanism
+      // invokes the WebAssembly object which might be absent in some browsers,
+      // therefore `import` can throw. Also some browsers might refuse to load a
+      // wasm module because of our CSP.
+      const { demangle_any } = await import('gecko-profiler-demangle');
+      return demangle_any;
+    } catch (error) {
+      // Module loading can fail (for example in browsers without WebAssembly
+      // support, or due to bad server configuration), so we will fall back
+      // to a pass-through function if that happens.
+      console.error('Demangling module could not be imported.', error);
+      return (mangledString) => mangledString;
+    }
+  }
 
-  return symbolStore;
+  async _getDemangleCallback(): Promise<DemangleFunction> {
+    return (this._demangleCallback ??= await this._createDemangleCallback());
+  }
+
+  // Try to get individual symbol tables from the browser, for any libraries
+  // which couldn't be symbolicated with the symbolication API.
+  // This is needed for two cases:
+  //  1. Firefox 95 and earlier, which didn't have a querySymbolicationApi
+  //     WebChannel access point, and only supports symbol tables.
+  //  2. Android system libraries, even in modern versions of Firefox. We don't
+  //     support querySymbolicationApi for them yet, see
+  //     https://bugzilla.mozilla.org/show_bug.cgi?id=1735897
+  async requestSymbolsViaSymbolTableFromBrowser(
+    request: LibSymbolicationRequest,
+    ignoreCache: boolean
+  ): Promise<Map<number, AddressResult>> {
+    // Check this._symbolDb first, and then call this._getSymbolTablesFromBrowser
+    // if we couldn't find the table in the cache.
+
+    // We also need a demangling function for this, which is in an async module.
+    const demangleCallback = await this._getDemangleCallback();
+
+    const { lib, addresses } = request;
+    const { debugName, breakpadId } = lib;
+    let symbolTable = null;
+
+    if (!ignoreCache) {
+      // Try to get the symbol table from the database.
+      // This call will return null if the symbol table is not present.
+      symbolTable = await this._symbolDb.getSymbolTable(debugName, breakpadId);
+    }
+
+    if (symbolTable === null) {
+      symbolTable = await this._requestSymbolTableFromBrowser(lib);
+      this._storeSymbolTableInDB(lib, symbolTable);
+    }
+
+    return readSymbolsFromSymbolTable(addresses, symbolTable, demangleCallback);
+  }
+
+  async _requestSymbolTableFromBrowser(
+    lib: RequestedLib
+  ): Promise<SymbolTableAsTuple> {
+    if (this._browserConnection === null) {
+      throw new Error(
+        'No connection to the browser, cannot obtain symbol tables'
+      );
+    }
+
+    const { debugName, breakpadId } = lib;
+    this._dispatch(requestingSymbolTable(lib));
+    try {
+      const symbolTable = await this._browserConnection.getSymbolTable(
+        debugName,
+        breakpadId
+      );
+      this._dispatch(receivedSymbolTableReply(lib));
+      return symbolTable;
+    } catch (error) {
+      this._dispatch(receivedSymbolTableReply(lib));
+      throw error;
+    }
+  }
+
+  // Store a symbol table in the database. This is only used for symbol tables
+  // and not for partial symbol results. Symbol tables are obtained from the
+  // browser via the geckoProfiler object which is defined in a frame script:
+  // https://searchfox.org/mozilla-central/rev/a9db89754fb507254cb8422e5a00af7c10d98264/devtools/client/performance-new/frame-script.js#67-81
+  //
+  // We do not store results from the Mozilla symbolication API, because those
+  // only contain the symbols we requested and not all the symbols of a given
+  // library.
+  async _storeSymbolTableInDB(
+    lib: RequestedLib,
+    symbolTable: SymbolTableAsTuple
+  ): Promise<void> {
+    const { debugName, breakpadId } = lib;
+    try {
+      await this._symbolDb.storeSymbolTable(debugName, breakpadId, symbolTable);
+    } catch (error) {
+      console.log(
+        `Failed to store the symbol table for ${debugName} in the database:`,
+        error
+      );
+    }
+  }
 }
 
 export async function doSymbolicateProfile(
@@ -671,15 +818,11 @@ export async function doSymbolicateProfile(
   await symbolicateProfile(
     profile,
     symbolStore,
-    (
-      threadIndex: ThreadIndex,
-      symbolicationStepInfo: SymbolicationStepInfo
-    ) => {
+    (symbolicationStepInfo: SymbolicationStepInfo) => {
       completionPromises.push(
         new Promise((resolve) => {
           _symbolicationStepQueueSingleton.enqueueSingleSymbolicationStep(
             dispatch,
-            threadIndex,
             symbolicationStepInfo,
             () => resolve(undefined)
           );
@@ -692,6 +835,85 @@ export async function doSymbolicateProfile(
   await Promise.all(completionPromises);
 
   dispatch(doneSymbolicating());
+}
+
+/**
+ * Resolve JS source maps for every source in the profile that has both a
+ * sourceMapURL and a UUID. Fetches source maps via the browser WebChannel.
+ *
+ * Also fetches the compiled source text which is required by the scope-tree
+ * name resolution in symbolicateWithSourceMaps.
+ */
+async function doResolveSourceMaps(
+  profile: Profile,
+  browserConnection: BrowserConnection,
+  dispatch: Dispatch
+): Promise<{
+  resolvedSourceMaps: Map<IndexIntoSourceTable, SourceMap>;
+  compiledSources: Map<IndexIntoSourceTable, string>;
+}> {
+  const { sources, stringArray } = profile.shared;
+
+  // Collect every source with a sourceMapURL and a UUID. Only UUID-bearing
+  // sources can be fetched via the browser WebChannel.
+  const sourceIndexesWithSourceMaps = new Set<IndexIntoSourceTable>();
+  for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex++) {
+    if (
+      sources.sourceMapURL[sourceIndex] !== null &&
+      sources.sourceMapURL[sourceIndex] !== undefined &&
+      typeof sources.id[sourceIndex] === 'string'
+    ) {
+      sourceIndexesWithSourceMaps.add(sourceIndex);
+    }
+  }
+
+  if (sourceIndexesWithSourceMaps.size === 0) {
+    return { resolvedSourceMaps: new Map(), compiledSources: new Map() };
+  }
+
+  // Fetch source maps and compiled sources in parallel, ignoring individual failures.
+  const resolvedSourceMaps: Map<IndexIntoSourceTable, SourceMap> = new Map();
+  const compiledSources: Map<IndexIntoSourceTable, string> = new Map();
+
+  dispatch({ type: 'START_SOURCE_MAP_FETCHING' });
+  try {
+    await Promise.all(
+      Array.from(sourceIndexesWithSourceMaps).map(async (sourceIndex) => {
+        const filename = stringArray[sources.filename[sourceIndex]];
+        // sourceId is guaranteed non-null by the filter above.
+        const sourceId = sources.id[sourceIndex] as string;
+
+        await Promise.all([
+          browserConnection
+            .getSourceMap(sourceId)
+            .then((result) => {
+              resolvedSourceMaps.set(sourceIndex, result);
+            })
+            .catch((e) => {
+              console.warn(
+                `Failed to fetch source map for "${filename}" (id=${sourceId}):`,
+                e
+              );
+            }),
+          browserConnection
+            .getJSSource(sourceId)
+            .then((text) => {
+              compiledSources.set(sourceIndex, text);
+            })
+            .catch((e) => {
+              console.warn(
+                `Failed to fetch compiled source for "${filename}" (id=${sourceId}):`,
+                e
+              );
+            }),
+        ]);
+      })
+    );
+  } finally {
+    dispatch({ type: 'DONE_SOURCE_MAP_FETCHING' });
+  }
+
+  return { resolvedSourceMaps, compiledSources };
 }
 
 export async function retrievePageFaviconsFromBrowser(
@@ -870,269 +1092,10 @@ export function temporaryError(error: TemporaryError): Action {
   };
 }
 
-function _wait(delayMs: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, delayMs));
-}
-
-function _loadProbablyFailedDueToSafariLocalhostHTTPRestriction(
-  url: string,
-  error: Error
-): boolean {
-  if (!navigator.userAgent.match(/Safari\/\d+\.\d+/)) {
-    return false;
-  }
-  // Check if Safari considers this mixed content.
-  const parsedUrl = new URL(url);
-  return (
-    error.name === 'TypeError' &&
-    parsedUrl.protocol === 'http:' &&
-    isLocalURL(parsedUrl) &&
-    location.protocol === 'https:'
-  );
-}
-
-class SafariLocalhostHTTPLoadError extends Error {
-  override name = 'SafariLocalhostHTTPLoadError';
-}
-
-type FetchProfileArgs = {
-  url: string;
-  onTemporaryError: (param: TemporaryError) => void;
-  // Allow tests to capture the reported error, but normally use console.error.
-  reportError?: (...data: Array<any>) => void;
-};
-
-type ProfileOrZip =
-  | { responseType: 'PROFILE'; profile: unknown }
-  | { responseType: 'ZIP'; zip: JSZip };
-
-/**
- * Tries to fetch a profile on `url`. If the profile is not found,
- * `onTemporaryError` is called with an appropriate error, we wait 1 second, and
- * then tries again. If we still can't find the profile after 11 tries, the
- * returned promise is rejected with a fatal error.
- * If we can retrieve the profile properly, the returned promise is resolved
- * with the JSON.parsed profile.
- */
-export async function _fetchProfile(
-  args: FetchProfileArgs
-): Promise<ProfileOrZip> {
-  const MAX_WAIT_SECONDS = 10;
-  let i = 0;
-  const { url, onTemporaryError } = args;
-  // Allow tests to capture the reported error, but normally use console.error.
-  const reportError = args.reportError || console.error;
-
-  while (true) {
-    let response;
-    try {
-      response = await fetch(url);
-    } catch (e) {
-      // Case 1: Exception.
-      if (_loadProbablyFailedDueToSafariLocalhostHTTPRestriction(url, e)) {
-        throw new SafariLocalhostHTTPLoadError();
-      }
-      throw e;
-    }
-
-    // Case 2: successful answer.
-    if (response.ok) {
-      return _extractProfileOrZipFromResponse(url, response, reportError);
-    }
-
-    // case 3: unrecoverable error.
-    if (response.status !== 403) {
-      throw new Error(oneLine`
-          Could not fetch the profile on remote server.
-          Response was: ${response.status} ${response.statusText}.
-        `);
-    }
-
-    // case 4: 403 errors can be transient while a profile is uploaded.
-
-    if (i++ === MAX_WAIT_SECONDS) {
-      // In the last iteration we don't send a temporary error because we'll
-      // throw an error right after the while loop.
-      break;
-    }
-
-    onTemporaryError(
-      new TemporaryError(
-        'Profile not found on remote server.',
-        { count: i, total: MAX_WAIT_SECONDS + 1 } // 11 tries during 10 seconds
-      )
-    );
-
-    await _wait(1000);
-  }
-
-  throw new Error(oneLine`
-    Could not fetch the profile on remote server:
-    still not found after ${MAX_WAIT_SECONDS} seconds.
-  `);
-}
-
-/**
- * Deduce the file type from a url and content type. Third parties can give us
- * arbitrary information, so make sure that we try out best to extract the proper
- * information about it.
- */
-function _deduceContentType(
-  url: string,
-  contentType: string | null
-): 'application/json' | 'application/zip' | null {
-  if (contentType === 'application/zip' || contentType === 'application/json') {
-    return contentType;
-  }
-  if (url.match(/\.zip$/)) {
-    return 'application/zip';
-  }
-  if (url.match(/\.json/)) {
-    return 'application/json';
-  }
-  return null;
-}
-
-/**
- * This function guesses the correct content-type (even if one isn't sent) and then
- * attempts to use the proper method to extract the response.
- */
-async function _extractProfileOrZipFromResponse(
-  url: string,
-  response: Response,
-  reportError: (...data: Array<any>) => void
-): Promise<ProfileOrZip> {
-  const contentType = _deduceContentType(
-    url,
-    response.headers.get('content-type')
-  );
-  switch (contentType) {
-    case 'application/zip':
-      return {
-        responseType: 'ZIP',
-        zip: await _extractZipFromResponse(response, reportError),
-      };
-    case 'application/json':
-    case null:
-      // The content type is null if it is unknown, or an unsupported type. Go ahead
-      // and try to process it as a profile.
-      return {
-        responseType: 'PROFILE',
-        profile: await _extractJsonFromResponse(
-          response,
-          reportError,
-          contentType
-        ),
-      };
-    default:
-      throw assertExhaustiveCheck(contentType);
-  }
-}
-
-/**
- * Attempt to load a zip file from a third party. This process can fail, so make sure
- * to handle and report the error if it does.
- */
-async function _extractZipFromResponse(
-  response: Response,
-  reportError: (...data: Array<any>) => void
-): Promise<JSZip> {
-  const buffer = await response.arrayBuffer();
-  // Workaround for https://github.com/Stuk/jszip/issues/941
-  // When running this code in tests, `buffer` doesn't inherits from _this_
-  // realm's ArrayBuffer object, and this breaks JSZip which doesn't account for
-  // this case. We workaround the issue by wrapping the buffer in an Uint8Array
-  // that comes from this realm.
-  const typedBuffer = new Uint8Array(buffer);
-  try {
-    const JSZip = await import('jszip');
-    const zip = await JSZip.loadAsync(typedBuffer);
-    // Catch the error if unable to load the zip.
-    return zip;
-  } catch (error) {
-    const message = 'Unable to open the archive file.';
-    reportError(message);
-    reportError('Error:', error);
-    reportError('Fetch response:', response);
-    throw new Error(
-      `${message} The full error information has been printed out to the DevTool’s console.`
-    );
-  }
-}
-
-/**
- * Parse JSON from an optionally gzipped array buffer.
- */
-async function _extractJsonFromArrayBuffer(
-  arrayBuffer: ArrayBuffer
-): Promise<unknown> {
-  let profileBytes = new Uint8Array(arrayBuffer);
-  // Check for the gzip magic number in the header.
-  if (isGzip(profileBytes)) {
-    profileBytes = await decompress(profileBytes);
-  }
-
-  const textDecoder = new TextDecoder();
-  return JSON.parse(textDecoder.decode(profileBytes));
-}
-
-/**
- * Don't trust third party responses, try and handle a variety of responses gracefully.
- */
-async function _extractJsonFromResponse(
-  response: Response,
-  reportError: (...data: Array<any>) => void,
-  fileType: 'application/json' | null
-): Promise<unknown> {
-  let arrayBuffer: ArrayBuffer | null = null;
-  try {
-    // await before returning so that we can catch JSON parse errors.
-    arrayBuffer = await response.arrayBuffer();
-    return await _extractJsonFromArrayBuffer(arrayBuffer);
-  } catch (error) {
-    // Change the error message depending on the circumstance:
-    let message;
-    if (error && typeof error === 'object' && error.name === 'AbortError') {
-      message = 'The network request to load the profile was aborted.';
-    } else if (fileType === 'application/json') {
-      message = 'The profile’s JSON could not be decoded.';
-    } else if (fileType === null && arrayBuffer !== null) {
-      // If the content type is not specified, use a raw array buffer
-      // to fallback to other supported profile formats.
-      return arrayBuffer;
-    } else {
-      message = oneLine`
-        The profile could not be downloaded and decoded. This does not look like a supported file
-        type.
-      `;
-    }
-
-    // Provide helpful debugging information to the console.
-    reportError(message);
-    reportError('JSON parsing error:', error);
-    reportError('Fetch response:', response);
-
-    throw new Error(
-      `${message} The full error information has been printed out to the DevTool’s console.`
-    );
-  }
-}
-
-export function getProfileUrlForHash(hash: string): string {
-  // See https://cloud.google.com/storage/docs/access-public-data
-  // The URL is https://storage.googleapis.com/<BUCKET>/<FILEPATH>.
-  // https://<BUCKET>.storage.googleapis.com/<FILEPATH> seems to also work but
-  // is not documented nowadays.
-
-  // By convention, "profile-store" is the name of our bucket, and the file path
-  // is the hash we receive in the URL.
-  return `https://storage.googleapis.com/${GOOGLE_STORAGE_BUCKET}/${hash}`;
-}
-
 export function retrieveProfileFromStore(
   hash: string,
   initialLoad: boolean = false
-): ThunkAction<Promise<void>> {
+): ThunkAction<Promise<ProfileUpgradeInfo>> {
   return retrieveProfileOrZipFromUrl(getProfileUrlForHash(hash), initialLoad);
 }
 
@@ -1144,12 +1107,12 @@ export function retrieveProfileFromStore(
 export function retrieveProfileOrZipFromUrl(
   profileUrl: string,
   initialLoad: boolean = false
-): ThunkAction<Promise<void>> {
+): ThunkAction<Promise<ProfileUpgradeInfo>> {
   return async function (dispatch) {
     dispatch(waitingForProfileFromUrl(profileUrl));
 
     try {
-      const response: ProfileOrZip = await _fetchProfile({
+      const response: ProfileOrZip = await fetchProfile({
         url: profileUrl,
         onTemporaryError: (e: TemporaryError) => {
           dispatch(temporaryError(e));
@@ -1157,32 +1120,34 @@ export function retrieveProfileOrZipFromUrl(
       });
 
       switch (response.responseType) {
-        case 'PROFILE': {
-          const serializedProfile = response.profile;
+        case 'BYTES': {
+          const profileUpgradeInfo = {};
           const profile = await unserializeProfileOfArbitraryFormat(
-            serializedProfile,
-            profileUrl
+            response.bytes,
+            profileUrl,
+            profileUpgradeInfo
           );
           if (profile === undefined) {
             throw new Error('Unable to parse the profile.');
           }
 
           await dispatch(loadProfile(profile, {}, initialLoad));
-          break;
+          return profileUpgradeInfo;
         }
         case 'ZIP': {
           const zip = response.zip;
           await dispatch(receiveZipFile(zip));
-          break;
+          return {};
         }
         default:
           throw assertExhaustiveCheck(
             response as never,
-            'Expected to receive an archive or profile from _fetchProfile.'
+            'Expected to receive an archive or profile from fetchProfile.'
           );
       }
     } catch (error) {
       dispatch(fatalError(error));
+      return {};
     }
   };
 }
@@ -1193,7 +1158,7 @@ export function waitingForProfileFromFile(): Action {
   };
 }
 
-function _fileReader(input: File) {
+export function _fileReader(input: File) {
   const reader = new FileReader();
   const promise = new Promise((resolve, reject) => {
     // Flow's definition for FileReader doesn't handle the polymorphic nature of
@@ -1233,10 +1198,10 @@ export function retrieveProfileFromFile(
     dispatch(waitingForProfileFromFile());
 
     try {
-      if (_deduceContentType(file.name, file.type) === 'application/zip') {
+      if (deduceContentType(file.name, file.type) === 'application/zip') {
         // Open a zip file in the zip file viewer
         const buffer = await fileReader(file).asArrayBuffer();
-        const JSZip = await import('jszip');
+        const { default: JSZip } = await import('jszip');
         const zip = await JSZip.loadAsync(buffer);
         await dispatch(receiveZipFile(zip));
       } else {
@@ -1288,6 +1253,24 @@ export function viewProfileFromPostMessage(
   };
 }
 
+// Given a profile view URL, extract the raw URL needed to fetch the profile
+// data. This mirrors the manual pathname splitting done in retrieveProfileForRawUrl,
+// so we can fetch the profile before calling stateFromLocation.
+function getProfileFetchUrl(urlString: string): string {
+  const pathParts = new URL(urlString).pathname.split('/').filter((d) => d);
+  const dataSource = ensureIsValidDataSource(pathParts[0]);
+  switch (dataSource) {
+    case 'public':
+      return getProfileUrlForHash(pathParts[1]);
+    case 'from-url':
+      return decodeURIComponent(pathParts[1]);
+    default:
+      throw new Error(
+        'Only public uploaded profiles are supported by the comparison function.'
+      );
+  }
+}
+
 /**
  * This action retrieves several profiles and push them into 1 profile using the
  * information contained in the query.
@@ -1300,9 +1283,7 @@ export function retrieveProfilesToCompare(
     dispatch(waitingForProfileFromUrl());
 
     try {
-      // First we get a state from each URL. From these states we'll get all the
-      // data we need to fetch and process the profiles.
-      const profileStates = await Promise.all(
+      const profilesAndStates = await Promise.all(
         profileViewUrls.map(async (url) => {
           if (
             url.startsWith('https://perfht.ml/') ||
@@ -1311,48 +1292,41 @@ export function retrieveProfilesToCompare(
           ) {
             url = await expandUrl(url);
           }
-          return stateFromLocation(new URL(url));
-        })
-      );
 
-      // Then we retrieve the profiles from the online store, and unserialize
-      // and process them if needed.
-      const promises = profileStates.map(
-        async ({ dataSource, hash, profileUrl }) => {
-          switch (dataSource) {
-            case 'public':
-              // Use a URL from the public store.
-              profileUrl = getProfileUrlForHash(hash);
-              break;
-            case 'from-url':
-              // Use the profile URL in the decoded state, decoded from the input URL.
-              break;
-            default:
-              throw new Error(
-                'Only public uploaded profiles are supported by the comparison function.'
-              );
-          }
-          const response: ProfileOrZip = await _fetchProfile({
+          const profileUrl = getProfileFetchUrl(url);
+
+          const response: ProfileOrZip = await fetchProfile({
             url: profileUrl,
             onTemporaryError: (e: TemporaryError) => {
               dispatch(temporaryError(e));
             },
           });
-          if (response.responseType !== 'PROFILE') {
-            throw new Error('Expected to receive a profile from _fetchProfile');
+          if (response.responseType !== 'BYTES') {
+            throw new Error(
+              'Expected to receive a single profile (not a zip) from fetchProfile'
+            );
           }
-          const serializedProfile = response.profile;
 
-          const profile =
-            unserializeProfileOfArbitraryFormat(serializedProfile);
-          return profile;
-        }
+          const upgradeInfo: ProfileUpgradeInfo = {};
+          const profile = await unserializeProfileOfArbitraryFormat(
+            response.bytes,
+            profileUrl,
+            upgradeInfo
+          );
+
+          const profileState = stateFromLocation(new URL(url), {
+            profile,
+            upgradeInfo,
+          });
+
+          return { profile, profileState };
+        })
       );
 
-      // Once all profiles have been fetched and unserialized, we can start
-      // pushing them to a brand new profile. This resulting profile will keep
-      // only the 2 selected threads from the 2 profiles.
-      const profiles = await Promise.all(promises);
+      const profiles = profilesAndStates.map(({ profile }) => profile);
+      const profileStates = profilesAndStates.map(
+        ({ profileState }) => profileState
+      );
 
       const {
         profile: resultProfile,
@@ -1382,14 +1356,20 @@ export function retrieveProfilesToCompare(
   };
 }
 
+export type ProfileAndProfileUpgradeInfo = {
+  profile: Profile;
+  upgradeInfo: ProfileUpgradeInfo;
+};
+
 // This function takes location(most probably `window.location`) as parameter
 // and loads the profile in that given location, then returns the profile data.
 // This function is being used to get the initial profile data before upgrading
 // the url and processing the UrlState.
+// `profileUpgradeInfo` is an outparam that will be popuplated by this function.
 export function retrieveProfileForRawUrl(
   location: Location,
   browserConnectionStatus?: BrowserConnectionStatus
-): ThunkAction<Promise<Profile | null>> {
+): ThunkAction<Promise<ProfileAndProfileUpgradeInfo | null>> {
   return async (dispatch, getState) => {
     const pathParts = location.pathname.split('/').filter((d) => d);
     let possibleDataSource = pathParts[0];
@@ -1400,15 +1380,18 @@ export function retrieveProfileForRawUrl(
     }
 
     let dataSource = ensureIsValidDataSource(possibleDataSource);
-    if (dataSource === 'from-file') {
-      // Redirect to 'none' if `dataSource` is 'from-file' since initial urls can't
-      // be 'from-file' and needs to be redirected to home page.
+    // Redirect to 'none' for from-file and unpublished data sources since initial
+    // urls can't be 'from-file' or 'unpublished' and need to be redirected to
+    // home page. 'unpublished' is a transient state after profile deletion.
+    if (dataSource === 'from-file' || dataSource === 'unpublished') {
       dataSource = 'none';
     }
     dispatch(setDataSource(dataSource));
 
+    let profileUpgradeInfo = {};
+
     switch (dataSource) {
-      case 'from-browser':
+      case 'from-browser': {
         if (browserConnectionStatus === undefined) {
           throw new Error(
             'Error: all callers of this function should supply a browserConnectionStatus argument for from-browser'
@@ -1418,11 +1401,14 @@ export function retrieveProfileForRawUrl(
           retrieveProfileFromBrowser(browserConnectionStatus, true)
         );
         break;
+      }
       case 'public':
-        await dispatch(retrieveProfileFromStore(pathParts[1], true));
+        profileUpgradeInfo = await dispatch(
+          retrieveProfileFromStore(pathParts[1], true)
+        );
         break;
       case 'from-url':
-        await dispatch(
+        profileUpgradeInfo = await dispatch(
           retrieveProfileOrZipFromUrl(decodeURIComponent(pathParts[1]), true)
         );
         break;
@@ -1475,7 +1461,6 @@ export function retrieveProfileForRawUrl(
       case 'uploaded-recordings':
       case 'none':
       case 'local':
-      case 'unpublished':
         // There is no profile to download for these datasources.
         break;
       default:
@@ -1486,7 +1471,12 @@ export function retrieveProfileForRawUrl(
     }
 
     // Profile may be null if the response was a zip file.
-    return getProfileOrNull(getState());
+    const profileOrNull = getProfileOrNull(getState());
+    if (profileOrNull === null) {
+      return null;
+    }
+
+    return { profile: profileOrNull, upgradeInfo: profileUpgradeInfo };
   };
 }
 
@@ -1575,7 +1565,7 @@ export function changeTabFilter(tabID: TabID | null): ThunkAction<void> {
         const thread = profile.threads[threadIndex];
         const { samples, jsAllocations, nativeAllocations } = thread;
         hasSamples = [samples, jsAllocations, nativeAllocations].some((table) =>
-          hasUsefulSamples(table?.stack, thread, profile.shared)
+          hasUsefulSamples(table?.stack, profile.shared)
         );
         if (hasSamples) {
           break;

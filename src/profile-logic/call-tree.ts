@@ -6,9 +6,7 @@ import { timeCode } from '../utils/time-code';
 import {
   getOriginAnnotationForFunc,
   getCategoryPairLabel,
-  getBottomBoxInfoForCallNode,
 } from './profile-data';
-import { resourceTypes } from './data-structures';
 import { getFunctionName } from './function-info';
 import type {
   CategoryList,
@@ -28,7 +26,10 @@ import type {
   CallNodeSelfAndSummary,
   SelfAndTotal,
   BalancedNativeAllocationsTable,
+  SampleCategoriesAndSubcategories,
+  IndexIntoCategoryList,
 } from 'firefox-profiler/types';
+import { ResourceType, FuncFlag } from 'firefox-profiler/types';
 
 import ExtensionIcon from '../../res/img/svg/extension.svg';
 import { formatCallNodeNumber, formatPercent } from '../utils/format-numbers';
@@ -37,6 +38,11 @@ import { checkBit } from '../utils/bitset';
 import * as ProfileData from './profile-data';
 import type { CallTreeSummaryStrategy } from '../types/actions';
 import type { CallNodeInfo, CallNodeInfoInverted } from './call-node-info';
+import type { SortableColumn } from '../components/shared/TreeView';
+import {
+  getBottomBoxInfoForCallNode,
+  getBottomBoxInfoForFunction,
+} from './bottom-box';
 
 type CallNodeChildren = IndexIntoCallNodeTable[];
 
@@ -95,10 +101,6 @@ function extractFaviconFromLibname(libname: string): string | null {
     }
     return url.href;
   } catch (_e) {
-    console.error(
-      'Error while extracing the favicon from the libname',
-      libname
-    );
     return null;
   }
 }
@@ -107,7 +109,8 @@ interface CallTreeInternal {
   hasChildren(callNodeIndex: IndexIntoCallNodeTable): boolean;
   createChildren(nodeIndex: IndexIntoCallNodeTable): CallNodeChildren;
   createRoots(): CallNodeChildren;
-  getSelfAndTotal(nodeIndex: IndexIntoCallNodeTable): SelfAndTotal;
+  getSelf(nodeIndex: IndexIntoCallNodeTable): number;
+  getTotal(nodeIndex: IndexIntoCallNodeTable): number;
   findHeaviestPathInSubtree(
     callNodeIndex: IndexIntoCallNodeTable
   ): CallNodePath;
@@ -173,10 +176,12 @@ export class CallTreeInternalNonInverted implements CallTreeInternal {
     return this._callNodeHasChildren[callNodeIndex] !== 0;
   }
 
-  getSelfAndTotal(callNodeIndex: IndexIntoCallNodeTable): SelfAndTotal {
-    const self = this._callTreeTimings.self[callNodeIndex];
-    const total = this._callTreeTimings.total[callNodeIndex];
-    return { self, total };
+  getSelf(callNodeIndex: IndexIntoCallNodeTable): number {
+    return this._callTreeTimings.self[callNodeIndex];
+  }
+
+  getTotal(callNodeIndex: IndexIntoCallNodeTable): number {
+    return this._callTreeTimings.total[callNodeIndex];
   }
 
   findHeaviestPathInSubtree(
@@ -218,11 +223,12 @@ export class CallTreeInternalFunctionList implements CallTreeInternal {
     return this._timings.sortedFuncs;
   }
 
-  getSelfAndTotal(nodeIndex: IndexIntoCallNodeTable): SelfAndTotal {
-    return {
-      self: this._timings.funcSelf[nodeIndex],
-      total: this._timings.funcTotal[nodeIndex],
-    };
+  getSelf(nodeIndex: IndexIntoCallNodeTable): number {
+    return this._timings.funcSelf[nodeIndex];
+  }
+
+  getTotal(nodeIndex: IndexIntoCallNodeTable): number {
+    return this._timings.funcTotal[nodeIndex];
   }
 
   findHeaviestPathInSubtree(
@@ -290,13 +296,19 @@ class CallTreeInternalInverted implements CallTreeInternal {
     return children;
   }
 
-  getSelfAndTotal(callNodeIndex: IndexIntoCallNodeTable): SelfAndTotal {
+  getSelf(callNodeIndex: IndexIntoCallNodeTable): number {
     if (this._callNodeInfo.isRoot(callNodeIndex)) {
-      const total = this._totalPerRootFunc[callNodeIndex];
-      return { self: total, total };
+      return this._totalPerRootFunc[callNodeIndex];
+    }
+    return 0;
+  }
+
+  getTotal(callNodeIndex: IndexIntoCallNodeTable): number {
+    if (this._callNodeInfo.isRoot(callNodeIndex)) {
+      return this._totalPerRootFunc[callNodeIndex];
     }
     const { total } = this._getTotalAndHasChildren(callNodeIndex);
-    return { self: 0, total };
+    return total;
   }
 
   _getTotalAndHasChildren(
@@ -359,6 +371,7 @@ export class CallTree {
   _internal: CallTreeInternal;
   _callNodeInfo: CallNodeInfo;
   _thread: Thread;
+  _previewFilteredCtssSamples: SamplesLikeTable;
   _rootTotalSummary: number;
   _displayDataByIndex: Map<IndexIntoCallNodeTable, CallNodeDisplayData>;
   // _children is indexed by IndexIntoCallNodeTable. Since they are
@@ -372,6 +385,7 @@ export class CallTree {
     thread: Thread,
     categories: CategoryList,
     callNodeInfo: CallNodeInfo,
+    previewFilteredCtssSamples: SamplesLikeTable,
     internal: CallTreeInternal,
     rootTotalSummary: number,
     isHighPrecision: boolean,
@@ -381,12 +395,23 @@ export class CallTree {
     this._internal = internal;
     this._callNodeInfo = callNodeInfo;
     this._thread = thread;
+    this._previewFilteredCtssSamples = previewFilteredCtssSamples;
     this._rootTotalSummary = rootTotalSummary;
     this._displayDataByIndex = new Map();
     this._children = [];
     this._roots = internal.createRoots();
     this._isHighPrecision = isHighPrecision;
     this._weightType = weightType;
+  }
+
+  // The call tree's own order (by total sample count) is the intended order,
+  // so no columns are user-sortable.
+  getSortableColumns(): SortableColumn[] {
+    return [];
+  }
+
+  getTotal(): number {
+    return this._rootTotalSummary;
   }
 
   getRoots() {
@@ -440,7 +465,8 @@ export class CallTree {
       this._thread.funcTable.name[funcIndex]
     );
 
-    const { self, total } = this._internal.getSelfAndTotal(callNodeIndex);
+    const total = this._internal.getTotal(callNodeIndex);
+    const self = this._internal.getSelf(callNodeIndex);
     const totalRelative = total / this._rootTotalSummary;
     const selfRelative = self / this._rootTotalSummary;
 
@@ -499,18 +525,23 @@ export class CallTree {
       const subcategoryIndex =
         this._callNodeInfo.subcategoryForNode(callNodeIndex);
       const badge = this._getInliningBadge(callNodeIndex, funcName);
-      const resourceIndex = this._thread.funcTable.resource[funcIndex];
-      const resourceType = this._thread.resourceTable.type[resourceIndex];
-      const isFrameLabel = resourceIndex === -1;
+      const funcFlags = this._thread.funcTable.flags[funcIndex];
+      const isFrameLabel = (funcFlags & FuncFlag.HasResource) === 0;
+      const resourceIndex = isFrameLabel
+        ? -1
+        : this._thread.funcTable.resource[funcIndex];
+      const resourceType = isFrameLabel
+        ? -1
+        : this._thread.resourceTable.type[resourceIndex];
       const libName = this._getOriginAnnotation(funcIndex);
       const weightType = this._weightType;
 
       let iconSrc = null;
       let icon = null;
 
-      if (resourceType === resourceTypes.webhost) {
+      if (resourceType === ResourceType.Webhost) {
         icon = iconSrc = extractFaviconFromLibname(libName);
-      } else if (resourceType === resourceTypes.addon) {
+      } else if (resourceType === ResourceType.Addon) {
         iconSrc = ExtensionIcon;
 
         const resourceNameIndex =
@@ -603,10 +634,13 @@ export class CallTree {
   _getOriginAnnotation(funcIndex: IndexIntoFuncTable): string {
     return getOriginAnnotationForFunc(
       funcIndex,
+      null,
+      this._thread.frameTable,
       this._thread.funcTable,
       this._thread.resourceTable,
       this._thread.stringTable,
-      this._thread.sources
+      this._thread.sources,
+      this._thread.sourceLocationTable
     );
   }
 
@@ -616,7 +650,16 @@ export class CallTree {
     return getBottomBoxInfoForCallNode(
       callNodeIndex,
       this._callNodeInfo,
-      this._thread
+      this._thread,
+      this._previewFilteredCtssSamples
+    );
+  }
+
+  getBottomBoxInfoForFunction(funcIndex: IndexIntoFuncTable): BottomBoxInfo {
+    return getBottomBoxInfoForFunction(
+      funcIndex,
+      this._thread,
+      this._previewFilteredCtssSamples
     );
   }
 
@@ -1050,6 +1093,7 @@ export function getCallTree(
   thread: Thread,
   callNodeInfo: CallNodeInfo,
   categories: CategoryList,
+  previewFilteredCtssSamples: SamplesLikeTable,
   callTreeTimings: CallTreeTimings,
   weightType: WeightType
 ): CallTree {
@@ -1061,6 +1105,7 @@ export function getCallTree(
           thread,
           categories,
           callNodeInfo,
+          previewFilteredCtssSamples,
           new CallTreeInternalNonInverted(callNodeInfo, timings),
           timings.rootTotalSummary,
           Boolean(thread.isJsTracer),
@@ -1073,6 +1118,7 @@ export function getCallTree(
           thread,
           categories,
           callNodeInfo,
+          previewFilteredCtssSamples,
           new CallTreeInternalFunctionList(timings),
           timings.rootTotalSummary,
           Boolean(thread.isJsTracer),
@@ -1085,6 +1131,7 @@ export function getCallTree(
           thread,
           categories,
           callNodeInfo,
+          previewFilteredCtssSamples,
           new CallTreeInternalInverted(
             ensureExists(callNodeInfo.asInverted()),
             timings
@@ -1215,6 +1262,25 @@ export function extractUnfilteredSamplesLikeTable(
     default:
       throw assertExhaustiveCheck(strategy);
   }
+}
+
+export function computeUnfilteredCtssSampleCategoriesAndSubcategories(
+  thread: Thread,
+  ctssSamples: SamplesLikeTable,
+  defaultCategory: IndexIntoCategoryList
+): SampleCategoriesAndSubcategories {
+  if (ctssSamples === thread.samples) {
+    const { category, subcategory } = thread.samples;
+    return {
+      sampleCategories: category,
+      sampleSubcategories: subcategory,
+    };
+  }
+  return ProfileData.computeSampleCategoriesAndSubcategories(
+    ctssSamples.stack,
+    thread.stackTable,
+    defaultCategory
+  );
 }
 
 /**

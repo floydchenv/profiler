@@ -8,7 +8,10 @@ import { getStackType } from 'firefox-profiler/profile-logic/transforms';
 import { parseFileNameFromSymbolication } from 'firefox-profiler/utils/special-paths';
 import { formatCallNodeNumberWithUnit } from 'firefox-profiler/utils/format-numbers';
 import { Icon } from 'firefox-profiler/components/shared/Icon';
-import { getCategoryPairLabel } from 'firefox-profiler/profile-logic/profile-data';
+import {
+  getCategoryPairLabel,
+  getOriginalPositionForFrame,
+} from 'firefox-profiler/profile-logic/profile-data';
 import { countPositiveValues } from 'firefox-profiler/utils';
 
 import type {
@@ -24,6 +27,7 @@ import type {
   IndexIntoCategoryList,
   IndexIntoSubcategoryListForCategory,
 } from 'firefox-profiler/types';
+import { FuncFlag } from 'firefox-profiler/types';
 
 import type {
   TimingsForPath,
@@ -31,6 +35,8 @@ import type {
   OneCategoryBreakdown,
 } from 'firefox-profiler/profile-logic/profile-data';
 import type { CallNodeInfo } from 'firefox-profiler/profile-logic/call-node-info';
+import { REPS, MODE } from 'devtools-reps';
+const { Rep } = REPS;
 
 import './CallNode.css';
 import classNames from 'classnames';
@@ -129,6 +135,7 @@ type Props = {
   readonly timings?: TimingsForPath;
   readonly callTreeSummaryStrategy: CallTreeSummaryStrategy;
   readonly displayStackType: boolean;
+  readonly argumentValues?: Array<object>;
 };
 
 /**
@@ -301,6 +308,12 @@ export class TooltipCallNode extends React.PureComponent<Props> {
     // JS Tracer threads have data relevant to the microsecond level.
     const isHighPrecision: boolean = Boolean(thread.isJsTracer);
 
+    // For inverted root nodes self === total, so per-category self values would
+    // just duplicate the running column. Pass null to suppress them.
+    const selfTimeForCategories = maybeTimings.isInvertedRoot
+      ? { ...selfTime, breakdownByCategory: null }
+      : selfTime;
+
     return (
       <div className="tooltipCallNodeCategory">
         {/* grid row -------------------------------------------------- */}
@@ -343,7 +356,7 @@ export class TooltipCallNode extends React.PureComponent<Props> {
         </div>
         {totalBreakdownByCategory.map((_, categoryIndex) =>
           this._maybeRenderOneCategoryGroup(
-            { totalTime, selfTime },
+            { totalTime, selfTime: selfTimeForCategories },
             categoryIndex,
             isHighPrecision
           )
@@ -358,6 +371,7 @@ export class TooltipCallNode extends React.PureComponent<Props> {
       thread,
       durationText,
       categories,
+      argumentValues,
       displayData,
       timings,
       callTreeSummaryStrategy,
@@ -375,9 +389,19 @@ export class TooltipCallNode extends React.PureComponent<Props> {
 
     let fileName = null;
 
-    const sourceIndex = thread.funcTable.source[funcIndex];
-
     const { sources } = thread;
+    const {
+      source: sourceIndex,
+      line: lineNumber,
+      column: columnNumber,
+    } = getOriginalPositionForFrame(
+      null,
+      funcIndex,
+      thread.frameTable,
+      thread.funcTable,
+      thread.sourceLocationTable
+    );
+
     if (sourceIndex !== null) {
       const fileNameIndex = sources.filename[sourceIndex];
       let fileNameURL = thread.stringTable.getString(fileNameIndex);
@@ -386,12 +410,8 @@ export class TooltipCallNode extends React.PureComponent<Props> {
       // If it's a path from symbolication, strip it down to just the actual path.
       fileNameURL = parseFileNameFromSymbolication(fileNameURL).path;
 
-      // JS functions have information about where the function starts.
-      // Add :<line>:<col> to the URL, if known.
-      const lineNumber = thread.funcTable.lineNumber[funcIndex];
       if (lineNumber !== null) {
         fileNameURL += ':' + lineNumber;
-        const columnNumber = thread.funcTable.columnNumber[funcIndex];
         if (columnNumber !== null) {
           fileNameURL += ':' + columnNumber;
         }
@@ -411,9 +431,10 @@ export class TooltipCallNode extends React.PureComponent<Props> {
     }
 
     let resource = null;
-    const resourceIndex = thread.funcTable.resource[funcIndex];
-
-    if (resourceIndex !== -1) {
+    const hasResource =
+      (thread.funcTable.flags[funcIndex] & FuncFlag.HasResource) !== 0;
+    if (hasResource) {
+      const resourceIndex = thread.funcTable.resource[funcIndex];
       const resourceNameIndex = thread.resourceTable.name[resourceIndex];
       // Because of our use of Grid Layout, all our elements need to be direct
       // children of the grid parent. That's why we use arrays here, to add
@@ -423,6 +444,29 @@ export class TooltipCallNode extends React.PureComponent<Props> {
           Resource:
         </div>,
         thread.stringTable.getString(resourceNameIndex),
+      ];
+    }
+
+    let argumentsElement = null;
+    if (argumentValues) {
+      argumentsElement = [
+        <div className="tooltipLabel" key="arguments">
+          Arguments:
+        </div>,
+        argumentValues.length === 0 ? (
+          <div key="argumentsVal">—</div>
+        ) : (
+          <div className="tooltipArguments" key="argumentsVal">
+            {argumentValues.map((previewObject, index) => (
+              <React.Fragment key={`arg-${index}`}>
+                {Rep({
+                  object: previewObject,
+                  mode: MODE.LONG,
+                })}
+              </React.Fragment>
+            ))}
+          </div>
+        ),
       ];
     }
 
@@ -483,9 +527,10 @@ export class TooltipCallNode extends React.PureComponent<Props> {
         stackTypeLabel = 'JavaScript';
         break;
       case 'unsymbolicated':
-        stackTypeLabel = thread.funcTable.isJS[funcIndex]
-          ? 'Unsymbolicated native'
-          : 'Unsymbolicated or generated JIT instructions';
+        stackTypeLabel =
+          (thread.funcTable.flags[funcIndex] & FuncFlag.IsJS) !== 0
+            ? 'Unsymbolicated native'
+            : 'Unsymbolicated or generated JIT instructions';
         break;
       default:
         throw new Error(`Unknown stack type case "${stackType}".`);
@@ -540,6 +585,7 @@ export class TooltipCallNode extends React.PureComponent<Props> {
             {pageAndParentPageURL}
             {fileName}
             {resource}
+            {argumentsElement}
           </div>
           {this._renderCategoryTimings(timings)}
         </div>

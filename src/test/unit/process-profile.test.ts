@@ -1,10 +1,13 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
+import { isJsonSlabsFile } from 'json-slabs';
+
 import {
   extractFuncsAndResourcesFromFrameLocations,
   processGeckoProfile,
-  serializeProfile,
+  serializeProfileToJsonSlabsFile,
+  serializeProfileToJsonString,
   unserializeProfileOfArbitraryFormat,
 } from '../../profile-logic/process-profile';
 import { GlobalDataCollector } from 'firefox-profiler/profile-logic/global-data-collector';
@@ -12,9 +15,11 @@ import { computeTimeColumnForRawSamplesTable } from '../../profile-logic/profile
 import { StringTable } from '../../utils/string-table';
 import {
   createGeckoProfile,
+  createGeckoProfileWithMarkers,
   createGeckoCounter,
   createGeckoMarkerStack,
   createGeckoProfilerOverhead,
+  getEmptySourceTable,
   getVisualMetrics,
 } from '../fixtures/profiles/gecko-profile';
 import { ensureExists } from '../../utils/types';
@@ -34,6 +39,7 @@ import type {
   IndexIntoStackTable,
   GeckoSamples,
 } from 'firefox-profiler/types';
+import { FrameFlag, FuncFlag } from 'firefox-profiler/types';
 
 describe('extract functions and resource from location strings', function () {
   // These location strings are turned into the proper funcs.
@@ -103,21 +109,21 @@ describe('extract functions and resource from location strings', function () {
     length: 2,
   };
   const globalDataCollector = new GlobalDataCollector();
+  globalDataCollector.addExtensionOrigins(extensions);
 
   it('extracts the information for all different types of locations', function () {
-    const { funcTable, resourceTable, frameFuncs } =
+    const { frameFuncs, frameLibs } =
       extractFuncsAndResourcesFromFrameLocations(
         locationIndexes,
         locationIndexes.map(() => false),
         geckoThreadStringArray,
         libs,
-        extensions,
         globalDataCollector,
-        undefined
+        getEmptySourceTable()
       );
 
     const {
-      shared: { sources },
+      shared: { sources, funcTable, resourceTable },
     } = globalDataCollector.finish();
     const stringTable = globalDataCollector.getStringTable();
 
@@ -127,24 +133,31 @@ describe('extract functions and resource from location strings', function () {
         const locationName = locations[locationIndex];
 
         const funcName = stringTable.getString(funcTable.name[funcIndex]);
-        const resourceIndex = funcTable.resource[funcIndex];
-        const isJS = funcTable.isJS[funcIndex];
-        const sourceIndex = funcTable.source[funcIndex];
-        const fileNameIndex =
-          sourceIndex !== null ? sources.filename[sourceIndex] : null;
+        const funcFlags = funcTable.flags[funcIndex];
+        const hasResource = (funcFlags & FuncFlag.HasResource) !== 0;
+        const resourceIndex = hasResource ? funcTable.resource[funcIndex] : -1;
+        const isJS = (funcFlags & FuncFlag.IsJS) !== 0;
+        const hasSource = (funcFlags & FuncFlag.HasSource) !== 0;
+        const fileNameIndex = hasSource
+          ? sources.filename[funcTable.source[funcIndex]]
+          : null;
         const fileName =
           fileNameIndex === null ? null : stringTable.getString(fileNameIndex);
-        const lineNumber = funcTable.lineNumber[funcIndex];
-        const columnNumber = funcTable.columnNumber[funcIndex];
-
-        let libIndex, resourceName, host, resourceType;
-        if (resourceIndex === -1) {
+        const lineNumber =
+          (funcFlags & FuncFlag.HasLine) !== 0
+            ? funcTable.lineNumber[funcIndex]
+            : null;
+        const columnNumber =
+          (funcFlags & FuncFlag.HasColumn) !== 0
+            ? funcTable.columnNumber[funcIndex]
+            : null;
+        let resourceName, host, resourceType;
+        if (!hasResource) {
           resourceName = null;
           host = null;
           resourceType = null;
         } else {
           const hostStringIndex = resourceTable.host[resourceIndex];
-          libIndex = resourceTable.lib[resourceIndex];
           resourceName = stringTable.getString(
             resourceTable.name[resourceIndex]
           );
@@ -154,10 +167,8 @@ describe('extract functions and resource from location strings', function () {
               : stringTable.getString(hostStringIndex);
           resourceType = resourceTable.type[resourceIndex];
         }
-        const lib =
-          libIndex === undefined || libIndex === null || libIndex === -1
-            ? undefined
-            : libs[libIndex];
+        const libIndex = frameLibs[locationIndex];
+        const lib = libIndex === null ? undefined : libs[libIndex];
 
         return [
           locationName,
@@ -177,6 +188,43 @@ describe('extract functions and resource from location strings', function () {
         ];
       })
     ).toMatchSnapshot();
+  });
+
+  it('has no address for an unsymbolicated location outside all mapped libraries', function () {
+    const testLocations = [
+      // Inside "No symbols library".
+      '0xc0ff33',
+      // Not inside any of the mapped libraries.
+      '0x7fffffffdead',
+      // Not parseable as an address at all.
+      '0xnonsense',
+    ];
+    const stringArray: string[] = [];
+    const stringTable = StringTable.withBackingArray(stringArray);
+    const indexes = testLocations.map((location) =>
+      stringTable.indexForString(location)
+    );
+
+    const { frameAddresses, frameLibs } =
+      extractFuncsAndResourcesFromFrameLocations(
+        indexes,
+        indexes.map(() => false),
+        stringArray,
+        libs,
+        new GlobalDataCollector(),
+        getEmptySourceTable()
+      );
+
+    expect(frameLibs[0]).not.toBeNull();
+    expect(frameAddresses[0]).toBe(0xff33);
+
+    // There is no library to be relative to, so there is no meaningful address.
+    // These must be null and not a -1 sentinel: a -1 would set the HasAddress
+    // flag and then land in the frame table's unsigned address column, where it
+    // would read back as 4294967295.
+    expect(frameLibs[1]).toBeNull();
+    expect(frameAddresses[1]).toBeNull();
+    expect(frameAddresses[2]).toBeNull();
   });
 });
 
@@ -281,12 +329,16 @@ describe('gecko counters processing', function () {
     expect(extractTime(childCounter)).toEqual(originalTime);
 
     expect(
-      computeTimeColumnForRawSamplesTable(processedCounters[0].samples)
+      Array.from(
+        computeTimeColumnForRawSamplesTable(processedCounters[0].samples)
+      )
     ).toEqual(originalTime);
 
     // The subprocess times are offset when processed:
     expect(
-      computeTimeColumnForRawSamplesTable(processedCounters[1].samples)
+      Array.from(
+        computeTimeColumnForRawSamplesTable(processedCounters[1].samples)
+      )
     ).toEqual(offsetTime);
   });
 });
@@ -382,22 +434,44 @@ describe('gecko profilerOverhead processing', function () {
 describe('serializeProfile', function () {
   it('should produce a parsable profile string', async function () {
     const profile = processGeckoProfile(createGeckoProfile());
-    const serialized = serializeProfile(profile);
+    const serialized = serializeProfileToJsonString(profile);
     expect(JSON.parse.bind(null, serialized)).not.toThrow();
   });
 
   it('should produce the same profile in a roundtrip', async function () {
     const profile = processGeckoProfile(createGeckoProfile());
-    const serialized = serializeProfile(profile);
+    const serialized = serializeProfileToJsonString(profile);
     const roundtrip = await unserializeProfileOfArbitraryFormat(serialized);
     // FIXME: Uncomment this line after resolving `undefined` serialization issue
     // See: https://github.com/firefox-devtools/profiler/issues/1599
     // expect(profile).toEqual(roundtrip);
 
-    const secondSerialized = serializeProfile(roundtrip);
+    const secondSerialized = serializeProfileToJsonString(roundtrip);
     const secondRountrip =
       await unserializeProfileOfArbitraryFormat(secondSerialized);
     expect(roundtrip).toEqual(secondRountrip);
+  });
+});
+
+describe('serializeProfileToJsonSlabsFile', function () {
+  it('should produce bytes recognized as a JsonSlabs file', function () {
+    const profile = processGeckoProfile(createGeckoProfile());
+    const bytes = serializeProfileToJsonSlabsFile(profile);
+    expect(isJsonSlabsFile(bytes)).toBe(true);
+  });
+
+  it('should produce the same profile in a roundtrip', async function () {
+    const profile = processGeckoProfile(createGeckoProfile());
+    const bytes = serializeProfileToJsonSlabsFile(profile);
+    const roundtrip = await unserializeProfileOfArbitraryFormat(bytes);
+
+    // Two roundtrips should be stable, mirroring the JSON serializer test
+    // above (see issue #1599 for why we can't compare against the original
+    // profile directly).
+    const secondBytes = serializeProfileToJsonSlabsFile(roundtrip);
+    const secondRoundtrip =
+      await unserializeProfileOfArbitraryFormat(secondBytes);
+    expect(roundtrip).toEqual(secondRoundtrip);
   });
 });
 
@@ -435,14 +509,21 @@ describe('js allocation processing', function () {
     };
   }
   function getFrameAddressesForStack(
-    thread: RawThread,
+    shared: RawProfileSharedData,
     stackIndex: IndexIntoStackTable | null
   ) {
     const addresses = [];
     let stack = stackIndex;
     while (stack !== null) {
-      addresses.push(thread.frameTable.address[thread.stackTable.frame[stack]]);
-      stack = thread.stackTable.prefix[stack];
+      const frame = shared.stackTable.frame[stack];
+      const flags = shared.frameTable.flags[frame];
+      addresses.push(
+        (flags & FrameFlag.HasAddress) !== 0
+          ? shared.frameTable.address[frame]
+          : -1
+      );
+      const offset = shared.stackTable.prefixOffset[stack];
+      stack = offset === 0 ? null : stack - offset;
     }
     addresses.reverse();
     return addresses;
@@ -480,19 +561,19 @@ describe('js allocation processing', function () {
     }
 
     // Assert that the transformation makes sense.
-    expect(jsAllocations.time).toEqual([0, 1, 2]);
+    expect(jsAllocations.time).toEqual(new Float64Array([0, 1, 2]));
     expect(jsAllocations.weight).toEqual([3, 5, 7]);
 
     // All addressses should be nudged by 1 byte, because js allocation stack frames
     // all come from stack walking (the instruction pointer frame is removed by gecko).
     expect(
-      getFrameAddressesForStack(processedThread, jsAllocations.stack[0])
+      getFrameAddressesForStack(processedProfile.shared, jsAllocations.stack[0])
     ).toEqual([-1, 0xf83, 0x1a44, 0x1bcc]);
     expect(
-      getFrameAddressesForStack(processedThread, jsAllocations.stack[1])
+      getFrameAddressesForStack(processedProfile.shared, jsAllocations.stack[1])
     ).toEqual([-1, 0xf83, 0x1a44, 0x1bcd]);
     expect(
-      getFrameAddressesForStack(processedThread, jsAllocations.stack[2])
+      getFrameAddressesForStack(processedProfile.shared, jsAllocations.stack[2])
     ).toEqual([]);
   });
 });
@@ -564,7 +645,7 @@ describe('native allocation processing', function () {
     }
 
     // Assert that the transformation makes sense.
-    expect(nativeAllocations.time).toEqual([0, 1, 2]);
+    expect(nativeAllocations.time).toEqual(new Float64Array([0, 1, 2]));
     expect(nativeAllocations.weight).toEqual([3, 5, 7]);
     expect(nativeAllocations.stack).toEqual([8, 9, null]);
   });
@@ -619,7 +700,7 @@ describe('gecko samples table processing', function () {
       hardcodedStackAfterProcessing
     );
     const sampleTimes = computeTimeColumnForRawSamplesTable(processedSamples);
-    expect(sampleTimes.slice(0, 2)).toEqual(hardcodedTime);
+    expect(Array.from(sampleTimes.slice(0, 2))).toEqual(hardcodedTime);
     expect(ensureExists(processedSamples.eventDelay).slice(0, 2)).toEqual(
       hardcodedEventDelay
     );
@@ -756,11 +837,15 @@ describe('visualMetrics processing', function () {
         (name) => shared.stringArray[name] === metricProgressMarkerName
       );
 
+      // eslint-plugin-jest only applies this rule inside a test callback;
+      // oxlint also applies it to helpers like this one.
+      /* oxlint-disable jest/no-conditional-expect */
       if (hasProgressMarker) {
         expect(metricProgressMarker).toBeTruthy();
       } else {
         expect(metricProgressMarker).toBeFalsy();
       }
+      /* oxlint-enable jest/no-conditional-expect */
 
       // Check the visual metric change markers.
       const metricChangeMarkerName = `${name} Change`;
@@ -905,14 +990,14 @@ describe('source table processing', function () {
 
     // Check that the global source table has the expected structure
     expect(processedProfile.shared.sources.filename).toBeArray();
-    expect(processedProfile.shared.sources.uuid).toBeArray();
+    expect(processedProfile.shared.sources.id).toBeArray();
     expect(processedProfile.shared.sources.length).toBeNumber();
 
     // Check that source indexes are consistent
     expect(processedProfile.shared.sources.filename.length).toBe(
       processedProfile.shared.sources.length
     );
-    expect(processedProfile.shared.sources.uuid.length).toBe(
+    expect(processedProfile.shared.sources.id.length).toBe(
       processedProfile.shared.sources.length
     );
 
@@ -932,59 +1017,55 @@ describe('source table processing', function () {
     const geckoProfile = createGeckoProfile();
     const processedProfile = processGeckoProfile(geckoProfile);
 
-    // Check that all threads have correct funcTable.source values
+    // Check that the funcTable has correct source values
     expect(processedProfile.threads.length).toBeGreaterThan(0);
-    for (const thread of processedProfile.threads) {
-      expect(thread.funcTable.source).toBeArray();
+    expect(processedProfile.shared.funcTable.source).toBeArray();
 
-      // Should have at least some functions in the test profile
-      expect(thread.funcTable.length).toBeGreaterThan(0);
+    // Should have at least some functions in the test profile
+    expect(processedProfile.shared.funcTable.length).toBeGreaterThan(0);
 
-      // Verify that source indexes are valid
-      for (let i = 0; i < thread.funcTable.length; i++) {
-        const sourceIndex = thread.funcTable.source[i];
-        if (sourceIndex === null) {
-          // Skip the native functions that don't have sources yet. They are
-          // added during symbolication.
-          continue;
-        }
-
-        expect(sourceIndex).toBeGreaterThanOrEqual(0);
-        expect(sourceIndex).toBeLessThan(
-          processedProfile.shared.sources.length
-        );
-
-        // Verify that the source points to a valid filename
-        const filenameIndex =
-          processedProfile.shared.sources.filename[sourceIndex];
-        expect(filenameIndex).toBeGreaterThanOrEqual(0);
-        expect(filenameIndex).toBeLessThan(
-          processedProfile.shared.stringArray.length
-        );
-
-        // Verify the filename string is not empty
-        const filename = processedProfile.shared.stringArray[filenameIndex];
-        expect(filename).toBeString();
-        expect(filename.length).toBeGreaterThan(0);
+    // Verify that source indexes are valid
+    for (let i = 0; i < processedProfile.shared.funcTable.length; i++) {
+      const sourceIndex = processedProfile.shared.funcTable.source[i];
+      if (sourceIndex === null) {
+        // Skip the native functions that don't have sources yet. They are
+        // added during symbolication.
+        continue;
       }
+
+      expect(sourceIndex).toBeGreaterThanOrEqual(0);
+      expect(sourceIndex).toBeLessThan(processedProfile.shared.sources.length);
+
+      // Verify that the source points to a valid filename
+      const filenameIndex =
+        processedProfile.shared.sources.filename[sourceIndex];
+      expect(filenameIndex).toBeGreaterThanOrEqual(0);
+      expect(filenameIndex).toBeLessThan(
+        processedProfile.shared.stringArray.length
+      );
+
+      // Verify the filename string is not empty
+      const filename = processedProfile.shared.stringArray[filenameIndex];
+      expect(filename).toBeString();
+      expect(filename.length).toBeGreaterThan(0);
     }
   });
 
-  it('should handle sources with null UUIDs correctly', function () {
+  it('should handle sources with null ID correctly', function () {
     const geckoProfile = createGeckoProfile();
     const processedProfile = processGeckoProfile(geckoProfile);
 
-    // Most sources in the test profile should have null UUIDs
+    // Most sources in the test profile should have null ID
     const { sources } = processedProfile.shared;
     for (let i = 0; i < sources.length; i++) {
-      // UUIDs can be null or string
-      expect(
-        sources.uuid[i] === null || typeof sources.uuid[i] === 'string'
-      ).toBe(true);
+      // ID can be null or string
+      expect(sources.id[i] === null || typeof sources.id[i] === 'string').toBe(
+        true
+      );
     }
   });
 
-  it('should deduplicate sources with same filename and UUID', function () {
+  it('should deduplicate sources with same filename and ID', function () {
     const geckoProfile = createGeckoProfile();
     const processedProfile = processGeckoProfile(geckoProfile);
 
@@ -994,8 +1075,8 @@ describe('source table processing', function () {
 
     for (let i = 0; i < sources.length; i++) {
       const filename = processedProfile.shared.stringArray[sources.filename[i]];
-      const uuid = sources.uuid[i];
-      const key = `${filename}:${uuid}`;
+      const id = sources.id[i];
+      const key = `${filename}:${id}`;
 
       // Should not have exact duplicates
       expect(filenameSet.has(key)).toBe(false);
@@ -1004,5 +1085,244 @@ describe('source table processing', function () {
 
     // The test profile should have at least one source
     expect(sources.length).toBeGreaterThan(0);
+  });
+});
+
+describe('Marker schema conversion', function () {
+  it('should add PII categories to marker schema fields', function () {
+    const geckoProfile = createGeckoProfile();
+    geckoProfile.meta.markerSchema.push(
+      {
+        name: 'Network',
+        display: [],
+        data: [],
+      },
+      {
+        name: 'Text',
+        display: [],
+        data: [{ key: 'name', format: 'unique-string' }],
+      },
+      {
+        name: 'PreferenceRead',
+        display: [],
+        data: [{ key: 'prefValue', format: 'string' }],
+      }
+    );
+
+    const processedProfile = processGeckoProfile(geckoProfile);
+    const schemasByName = Object.fromEntries(
+      processedProfile.meta.markerSchema.map((schema) => [schema.name, schema])
+    );
+
+    expect(schemasByName.Network.fields).toEqual([
+      { key: 'URI', format: 'string', hidden: true, containsPII: ['url'] },
+      {
+        key: 'RedirectURI',
+        format: 'string',
+        hidden: true,
+        containsPII: ['url'],
+      },
+      {
+        key: 'isPrivateBrowsing',
+        format: 'string',
+        hidden: true,
+        containsPII: ['private-browsing'],
+      },
+    ]);
+    expect(schemasByName.Text.fields).toEqual([
+      {
+        key: 'name',
+        format: 'unique-string',
+        containsPII: ['url'],
+      },
+    ]);
+    expect(schemasByName.PreferenceRead.fields).toEqual([
+      {
+        key: 'prefValue',
+        format: 'string',
+        containsPII: ['preference-value'],
+      },
+    ]);
+  });
+
+  it('preserves FileIO label metadata when processing and saving a profile', async function () {
+    const tableLabel = 'Custom FileIO label';
+    const geckoProfile = createGeckoProfile();
+    geckoProfile.processes[0].meta.markerSchema.push({
+      name: 'FileIO',
+      tableLabel,
+      display: ['marker-chart', 'marker-table'],
+      data: [],
+    });
+
+    const processedProfile = processGeckoProfile(geckoProfile);
+    const fileIoSchema = processedProfile.meta.markerSchema.find(
+      (schema) => schema.name === 'FileIO'
+    );
+    expect(fileIoSchema?.tableLabel).toBe(tableLabel);
+
+    const reloadedProfile = await unserializeProfileOfArbitraryFormat(
+      serializeProfileToJsonString(processedProfile)
+    );
+    expect(reloadedProfile.meta.markerSchema).toEqual(
+      processedProfile.meta.markerSchema
+    );
+  });
+
+  it('should convert extension text markers to structured payloads', function () {
+    const extensionChildText = 'child@example.com, api_call: tabs.query';
+    const geckoProfile = createGeckoProfileWithMarkers([
+      {
+        name: 'ExtensionParent',
+        startTime: 0,
+        endTime: 1,
+        phase: 1,
+        data: {
+          type: 'Text',
+          name: 'parent@example.com, api_event: runtime.onMessage',
+        },
+      },
+      {
+        name: 'ExtensionChild',
+        startTime: 1,
+        endTime: 2,
+        phase: 1,
+        data: { type: 'Text', name: extensionChildText },
+      },
+      {
+        name: 'Extension Suspend',
+        startTime: 2,
+        endTime: 3,
+        phase: 1,
+        data: {
+          type: 'Text',
+          name: 'onBeforeRequest https://example.com by addon@example.com (chanId: 42)',
+        },
+      },
+    ]);
+    const geckoThread = geckoProfile.threads[0];
+    const extensionChildPayload = geckoThread.markers.data[1][5];
+    if (!extensionChildPayload || extensionChildPayload.type !== 'Text') {
+      throw new Error('Expected a Text marker');
+    }
+    extensionChildPayload.name =
+      geckoThread.stringTable.push(extensionChildText) - 1;
+
+    const processedProfile = processGeckoProfile(geckoProfile);
+
+    expect(processedProfile.threads[0].markers.data).toEqual([
+      {
+        type: 'ExtensionText',
+        name: 'api_event: runtime.onMessage',
+        extensionId: 'parent@example.com',
+      },
+      {
+        type: 'ExtensionText',
+        name: 'api_call: tabs.query',
+        extensionId: 'child@example.com',
+      },
+      {
+        type: 'ExtensionText',
+        name: 'onBeforeRequest https://example.com',
+        extensionId: 'addon@example.com (chanId: 42)',
+      },
+    ]);
+    const schemasByName = Object.fromEntries(
+      processedProfile.meta.markerSchema.map((schema) => [schema.name, schema])
+    );
+    expect(schemasByName.ExtensionText.fields).toEqual([
+      {
+        key: 'extensionId',
+        label: 'Extension ID',
+        format: 'string',
+        containsPII: ['extension-id'],
+      },
+      {
+        key: 'name',
+        label: 'Details',
+        format: 'string',
+        containsPII: ['url'],
+      },
+    ]);
+  });
+
+  it('should preserve optional marker schema properties', function () {
+    const geckoProfile = createGeckoProfile();
+
+    // Add marker schemas with various optional properties
+    geckoProfile.meta.markerSchema.push(
+      {
+        name: 'TestMarkerMinimal',
+        display: ['marker-chart'],
+        data: [{ key: 'name', label: 'Name', format: 'string' }],
+      },
+      {
+        name: 'TestMarkerWithLabels',
+        tooltipLabel: 'Custom Tooltip',
+        tableLabel: '{marker.data.status}',
+        chartLabel: 'Chart: {marker.data.name}',
+        display: ['marker-chart', 'marker-table'],
+        data: [
+          { key: 'name', label: 'Name', format: 'string' },
+          { key: 'status', label: 'Status', format: 'string' },
+        ],
+      },
+      {
+        name: 'TestMarkerWithGraphs',
+        display: ['marker-chart'],
+        data: [{ key: 'value', label: 'Value', format: 'integer' }],
+        graphs: [{ key: 'value', type: 'line', color: 'blue' }],
+        isStackBased: false,
+      },
+      {
+        name: 'TestMarkerWithColor',
+        display: ['marker-chart', 'marker-table'],
+        data: [
+          { key: 'status', label: 'Status', format: 'string' },
+          { key: 'color', label: 'Color', format: 'string' },
+        ],
+        colorField: 'color',
+      }
+    );
+
+    // Process the profile
+    const processedProfile = processGeckoProfile(geckoProfile);
+
+    // Test minimal schema works
+    const schemaMinimal = processedProfile.meta.markerSchema.find(
+      (s) => s.name === 'TestMarkerMinimal'
+    );
+    expect(schemaMinimal).toBeDefined();
+    expect(schemaMinimal?.tooltipLabel).toBeUndefined();
+    expect(schemaMinimal?.tableLabel).toBeUndefined();
+    expect(schemaMinimal?.chartLabel).toBeUndefined();
+    expect(schemaMinimal?.colorField).toBeUndefined();
+    expect(schemaMinimal?.graphs).toBeUndefined();
+    expect(schemaMinimal?.isStackBased).toBeUndefined();
+
+    // Test labels are preserved
+    const schemaWithLabels = processedProfile.meta.markerSchema.find(
+      (s) => s.name === 'TestMarkerWithLabels'
+    );
+    expect(schemaWithLabels).toBeDefined();
+    expect(schemaWithLabels?.tooltipLabel).toBe('Custom Tooltip');
+    expect(schemaWithLabels?.tableLabel).toBe('{marker.data.status}');
+    expect(schemaWithLabels?.chartLabel).toBe('Chart: {marker.data.name}');
+
+    // Test graphs and isStackBased are preserved
+    const schemaWithGraphs = processedProfile.meta.markerSchema.find(
+      (s) => s.name === 'TestMarkerWithGraphs'
+    );
+    expect(schemaWithGraphs).toBeDefined();
+    expect(schemaWithGraphs?.graphs).toHaveLength(1);
+    expect(schemaWithGraphs?.isStackBased).toBe(false);
+    expect(schemaWithGraphs?.colorField).toBeUndefined();
+
+    // Test colorField is preserved
+    const schemaWithColor = processedProfile.meta.markerSchema.find(
+      (s) => s.name === 'TestMarkerWithColor'
+    );
+    expect(schemaWithColor).toBeDefined();
+    expect(schemaWithColor?.colorField).toBe('color');
   });
 });

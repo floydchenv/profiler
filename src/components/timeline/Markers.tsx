@@ -27,6 +27,7 @@ import type {
   CssPixels,
   Marker,
   MarkerIndex,
+  MarkerDisplayLocation,
   ThreadsKey,
 } from 'firefox-profiler/types';
 
@@ -154,7 +155,7 @@ class TimelineMarkersCanvas extends React.PureComponent<CanvasProps> {
           )
         : Number.MAX_SAFE_INTEGER;
       const markerStyle = getMarkerStyle(marker);
-      ctx.fillStyle = markerStyle.background;
+      ctx.fillStyle = markerStyle.getBackground();
       if (markerStyle.squareCorners) {
         ctx.fillRect(pos, markerStyle.top, itemWidth, markerStyle.height);
       } else {
@@ -167,12 +168,12 @@ class TimelineMarkersCanvas extends React.PureComponent<CanvasProps> {
           1 / devicePixelRatio
         );
       }
-      if (markerStyle.borderLeft !== null) {
-        ctx.fillStyle = markerStyle.borderLeft;
+      if (markerStyle.hasBorderLeft()) {
+        ctx.fillStyle = markerStyle.getBorderLeft();
         ctx.fillRect(pos, markerStyle.top, 1, markerStyle.height);
       }
-      if (markerStyle.borderRight !== null) {
-        ctx.fillStyle = markerStyle.borderRight;
+      if (markerStyle.hasBorderRight()) {
+        ctx.fillStyle = markerStyle.getBorderRight();
         ctx.fillRect(
           pos + itemWidth - 1,
           markerStyle.top,
@@ -237,7 +238,16 @@ class TimelineMarkersCanvas extends React.PureComponent<CanvasProps> {
 
   override componentDidMount() {
     this._scheduleDraw();
+    window.addEventListener('profiler-theme-change', this._onThemeChange);
   }
+
+  override componentWillUnmount() {
+    window.removeEventListener('profiler-theme-change', this._onThemeChange);
+  }
+
+  _onThemeChange = () => {
+    this._scheduleDraw();
+  };
 
   override componentDidUpdate() {
     this._scheduleDraw();
@@ -497,6 +507,7 @@ class TimelineMarkers extends React.PureComponent<Props, State> {
               marker={hoveredMarker}
               threadsKey={threadsKey}
               restrictHeightWidth={true}
+              hideFilterButton={true}
             />
           </Tooltip>
         ) : null}
@@ -647,4 +658,54 @@ export const TimelineMarkersIPC = explicitConnect<
   },
   mapDispatchToProps: { changeRightClickedMarker },
   component: withSize(TimelineMarkers),
+});
+
+/**
+ * Marker row rendered above a counter track's graph. Filters markers by the
+ * schema location declared on the counter, so any counter type can host its
+ * own marker row without the component having to know which category it is.
+ */
+type TimelineMarkersCounterOwnProps = OwnProps & {
+  readonly markerSchemaLocation: MarkerDisplayLocation;
+};
+
+// Drops the counter-specific own prop before forwarding to the base markers
+// component, which doesn't know about markerSchemaLocation.
+const _SizedTimelineMarkers = withSize(TimelineMarkers);
+function _TimelineMarkersCounterInner(
+  props: ConnectedProps<
+    TimelineMarkersCounterOwnProps,
+    StateProps,
+    DispatchProps
+  >
+) {
+  const { markerSchemaLocation: _unused, ...rest } = props;
+  return <_SizedTimelineMarkers {...rest} />;
+}
+
+export const TimelineMarkersCounter = explicitConnect<
+  TimelineMarkersCounterOwnProps,
+  StateProps,
+  DispatchProps
+>({
+  mapStateToProps: (state, props) => {
+    const { threadsKey, markerSchemaLocation } = props;
+    const selectors = getThreadSelectorsFromThreadsKey(threadsKey);
+    const selectedThreads = getSelectedThreadIndexes(state);
+
+    return {
+      getMarker: selectors.getMarkerGetter(state),
+      markerIndexes:
+        selectors.getTimelineMarkerIndexesBySchemaLocation(
+          markerSchemaLocation
+        )(state),
+      isSelected: _getTimelineMarkersIsSelected(selectedThreads, threadsKey),
+      isModifyingSelection: getPreviewSelectionIsBeingModified(state),
+      additionalClassName: 'timelineMarkersCounter',
+      testId: 'TimelineMarkersCounter',
+      rightClickedMarker: selectors.getRightClickedMarker(state),
+    };
+  },
+  mapDispatchToProps: { changeRightClickedMarker },
+  component: _TimelineMarkersCounterInner,
 });

@@ -22,7 +22,10 @@ import {
   getProcessIdToNameMap,
   getThreadSelectorsFromThreadsKey,
 } from 'firefox-profiler/selectors';
-import { changeMarkersSearchString } from 'firefox-profiler/actions/profile-view';
+import {
+  changeMarkersSearchString,
+  changeNetworkSearchString,
+} from 'firefox-profiler/actions/profile-view';
 
 import {
   TooltipNetworkMarkerPhases,
@@ -37,8 +40,8 @@ import {
 import { Backtrace } from 'firefox-profiler/components/shared/Backtrace';
 
 import {
-  formatMarkupFromMarkerSchema,
   getSchemaFromMarker,
+  formatFromMarkerSchema,
 } from 'firefox-profiler/profile-logic/marker-schema';
 import { computeScreenshotSize } from 'firefox-profiler/profile-logic/marker-data';
 
@@ -52,6 +55,8 @@ import type {
   PageList,
   MarkerSchemaByName,
   MarkerIndex,
+  MarkerFormatType,
+  MarkerPayload,
   InnerWindowID,
   Page,
   Pid,
@@ -59,6 +64,7 @@ import type {
   IndexIntoStackTable,
 } from 'firefox-profiler/types';
 
+import type { StringTable } from 'firefox-profiler/utils/string-table';
 import type { ConnectedProps } from 'firefox-profiler/utils/connect';
 import {
   getGCMinorDetails,
@@ -83,6 +89,7 @@ type OwnProps = {
   readonly marker: Marker;
   readonly threadsKey: ThreadsKey;
   readonly className?: string;
+  readonly hideFilterButton?: boolean;
   // In tooltips it can be awkward for really long and tall things to force
   // the layout to be huge. This option when set to true will restrict the
   // height of things like stacks, and the width of long things like URLs.
@@ -109,6 +116,7 @@ type StateProps = {
 
 type DispatchProps = {
   readonly changeMarkersSearchString: typeof changeMarkersSearchString;
+  readonly changeNetworkSearchString: typeof changeNetworkSearchString;
 };
 
 type Props = ConnectedProps<OwnProps, StateProps, DispatchProps>;
@@ -281,13 +289,14 @@ class MarkerTooltipContents extends React.PureComponent<Props> {
           const displayLabel = this.props.showKeys ? key : label || key;
           details.push(
             <TooltipDetail key={schema.name + '-' + key} label={displayLabel}>
-              {formatMarkupFromMarkerSchema(
+              {renderMarkerFieldValue(
                 schema.name,
                 format,
                 value,
                 thread.stringTable,
                 threadIdToNameMap,
-                processIdToNameMap
+                processIdToNameMap,
+                data
               )}
             </TooltipDetail>
           );
@@ -343,67 +352,6 @@ class MarkerTooltipContents extends React.PureComponent<Props> {
               {_maybeFormatDuration(data.recvEndTime, data.endTime)}
             </TooltipDetail>
           );
-          break;
-        }
-        case 'CompositorScreenshot': {
-          if (
-            data.url !== undefined &&
-            'windowWidth' in data &&
-            'windowHeight' in data
-          ) {
-            const { width, height } = computeScreenshotSize(
-              data,
-              MAXIMUM_IMAGE_SIZE
-            );
-            details.push(
-              <TooltipDetail label="Image" key="CompositorScreenshot-image">
-                <img
-                  className="tooltipScreenshotImg"
-                  src={thread.stringTable.getString(data.url)}
-                  style={{
-                    width,
-                    height,
-                  }}
-                />
-              </TooltipDetail>,
-              <TooltipDetail
-                label="Window Size"
-                key="CompositorScreenshot-window size"
-              >
-                <>
-                  {data.windowWidth}px × {data.windowHeight}px
-                </>
-              </TooltipDetail>,
-              <TooltipDetail
-                label="Description"
-                key="CompositorScreenshot-description"
-              >
-                This marker spans the time between each composite of a window
-                and shows the window contents during that time.
-              </TooltipDetail>,
-              <TooltipDetail
-                label="Window ID"
-                key="CompositorScreenshot-window id"
-              >
-                {data.windowID}
-              </TooltipDetail>
-            );
-          } else if (marker.name === 'CompositorScreenshotWindowDestroyed') {
-            details.push(
-              <TooltipDetail
-                label="Description"
-                key="CompositorScreenshot-description"
-              >
-                This marker shows the moment a window has been destroyed.
-              </TooltipDetail>,
-              <TooltipDetail
-                label="Window ID"
-                key="CompositorScreenshot-window id"
-              >
-                {data.windowID}
-              </TooltipDetail>
-            );
-          }
           break;
         }
         default:
@@ -490,10 +438,18 @@ class MarkerTooltipContents extends React.PureComponent<Props> {
   }
 
   _onFilterButtonClick = () => {
-    const { markerIndex, getMarkerSearchTerm, changeMarkersSearchString } =
-      this.props;
+    const {
+      marker,
+      markerIndex,
+      getMarkerSearchTerm,
+      changeMarkersSearchString,
+      changeNetworkSearchString,
+    } = this.props;
     const searchTerm = getMarkerSearchTerm(markerIndex);
     changeMarkersSearchString(searchTerm);
+    if (marker.data && marker.data.type === 'Network') {
+      changeNetworkSearchString(searchTerm);
+    }
   };
 
   /**
@@ -519,8 +475,13 @@ class MarkerTooltipContents extends React.PureComponent<Props> {
    * a short list of rendering strategies, in the order they appear.
    */
   override render() {
-    const { className, markerIndex, getMarkerLabel, getMarkerSearchTerm } =
-      this.props;
+    const {
+      className,
+      markerIndex,
+      getMarkerLabel,
+      getMarkerSearchTerm,
+      hideFilterButton,
+    } = this.props;
     const markerLabel = getMarkerLabel(markerIndex);
     const searchTerm = getMarkerSearchTerm(markerIndex);
     return (
@@ -530,19 +491,21 @@ class MarkerTooltipContents extends React.PureComponent<Props> {
             {this._maybeRenderMarkerDuration()}
             <div className="tooltipTitle">
               <span className="tooltipTitleText">{markerLabel}</span>
-              <Localized
-                id="MarkerTooltip--filter-button-tooltip"
-                vars={{ filter: searchTerm }}
-                attrs={{ title: true, 'aria-label': true }}
-              >
-                <button
-                  className="tooltipTitleFilterButton"
-                  type="button"
-                  title={`Only show markers matching: “${searchTerm}”`}
-                  aria-label={`Only show markers matching: “${searchTerm}”`}
-                  onClick={this._onFilterButtonClick}
-                />
-              </Localized>
+              {!hideFilterButton ? (
+                <Localized
+                  id="MarkerTooltip--filter-button-tooltip"
+                  vars={{ filter: searchTerm }}
+                  attrs={{ title: true, 'aria-label': true }}
+                >
+                  <button
+                    className="tooltipTitleFilterButton"
+                    type="button"
+                    title={`Only show markers matching: “${searchTerm}”`}
+                    aria-label={`Only show markers matching: “${searchTerm}”`}
+                    onClick={this._onFilterButtonClick}
+                  />
+                </Localized>
+              ) : null}
             </div>
           </div>
         </div>
@@ -555,6 +518,157 @@ class MarkerTooltipContents extends React.PureComponent<Props> {
         {this._maybeRenderNetworkPhases()}
       </div>
     );
+  }
+}
+
+// Matches a value that is *entirely* a single http(s) URL. We only render a
+// clickable link when the whole string is a URL, so a longer descriptive
+// string is never turned into a broken link.
+const URL_REGEXP = /^(https?:\/\/)\S+$/;
+
+/**
+ * This function may return structured markup for some types suchs as table,
+ * list, urls, or images. For other types this falls back to formatFromMarkerSchema
+ * above.
+ */
+export function renderMarkerFieldValue(
+  markerType: string,
+  format: MarkerFormatType,
+  value: any,
+  stringTable: StringTable,
+  threadIdToNameMap?: Map<Tid, string>,
+  processIdToNameMap?: Map<Pid, string>,
+  // The payload the value comes from, for formats that refer to a sibling field.
+  payload?: MarkerPayload | null
+): React.ReactElement | string {
+  if (value === undefined || value === null) {
+    console.warn(`Formatting ${value} for ${JSON.stringify(markerType)}`);
+    return '(empty)';
+  }
+  if (format !== 'url' && typeof format !== 'object' && format !== 'list') {
+    return formatFromMarkerSchema(
+      markerType,
+      format,
+      value,
+      stringTable,
+      threadIdToNameMap,
+      processIdToNameMap
+    );
+  }
+  if (typeof format === 'object') {
+    switch (format.type) {
+      case 'table': {
+        const { columns } = format;
+        if (!(value instanceof Array)) {
+          throw new Error('Expected an array for table type');
+        }
+        const hasHeader = columns.some((column) => column.label);
+        return (
+          <table className="marker-table-value">
+            {hasHeader ? (
+              <thead>
+                <tr>
+                  {columns.map((col, i) => (
+                    <th key={i}>{col.label || ''}</th>
+                  ))}
+                </tr>
+              </thead>
+            ) : null}
+            <tbody>
+              {value.map((row, i) => {
+                if (!(row instanceof Array)) {
+                  throw new Error('Expected an array for table row');
+                }
+
+                if (row.length !== columns.length) {
+                  throw new Error(
+                    `Row ${i} length doesn't match column count (row: ${row.length}, cols: ${columns.length})`
+                  );
+                }
+                return (
+                  <tr key={i}>
+                    {row.map((cell, i) => {
+                      return (
+                        <td key={i}>
+                          {renderMarkerFieldValue(
+                            markerType,
+                            columns[i].type || 'string',
+                            cell,
+                            stringTable,
+                            threadIdToNameMap,
+                            processIdToNameMap,
+                            payload
+                          )}
+                        </td>
+                      );
+                    })}
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        );
+      }
+      case 'screenshot-data-url': {
+        const size = (payload as any)?.[format.sizeFieldForAspectRatio];
+        return (
+          <img
+            className="tooltipScreenshotImg"
+            src={stringTable.getString(value)}
+            style={
+              size
+                ? computeScreenshotSize(size, MAXIMUM_IMAGE_SIZE)
+                : {
+                    maxWidth: MAXIMUM_IMAGE_SIZE,
+                    maxHeight: MAXIMUM_IMAGE_SIZE,
+                  }
+            }
+          />
+        );
+      }
+      default:
+        throw new Error(
+          `Unknown format type ${JSON.stringify(format as never)}`
+        );
+    }
+  }
+  switch (format) {
+    case 'list':
+      if (!(value instanceof Array)) {
+        throw new Error('Expected an array for list format');
+      }
+      return (
+        <ul className="marker-list-value">
+          {value.map((_entry, i) => (
+            <li key={i}>
+              {renderMarkerFieldValue(
+                markerType,
+                'string',
+                value[i],
+                stringTable
+              )}
+            </li>
+          ))}
+        </ul>
+      );
+    case 'url': {
+      const match = URL_REGEXP.exec(value);
+      if (!match) {
+        return value;
+      }
+      return (
+        <a
+          href={value}
+          target="_blank"
+          rel="noreferrer"
+          className="marker-link-value"
+        >
+          {value.slice(match[1].length)}
+        </a>
+      );
+    }
+    default:
+      throw new Error(`Unknown format type ${JSON.stringify(format as never)}`);
   }
 }
 
@@ -580,7 +694,7 @@ const ConnectedMarkerTooltipContents = explicitConnect<
       categories: getCategories(state),
     };
   },
-  mapDispatchToProps: { changeMarkersSearchString },
+  mapDispatchToProps: { changeMarkersSearchString, changeNetworkSearchString },
   component: MarkerTooltipContents,
 });
 

@@ -23,9 +23,13 @@ import type {
   AssemblyViewState,
   IsOpenPerPanelState,
   TabID,
+  SelectedMarkersPerThread,
 } from 'firefox-profiler/types';
 
 import type { TabSlug } from '../app-logic/tabs-handling';
+import type { SingleColumnSortState } from '../components/shared/TreeView';
+import { translateThreadsKey } from 'firefox-profiler/profile-logic/profile-data';
+import { translateTransformStack } from 'firefox-profiler/profile-logic/transforms';
 
 /*
  * This state file governs the state that comes from, and alters, the window
@@ -143,12 +147,17 @@ const selectedThreads: Reducer<Set<ThreadIndex> | null> = (
       // Only switch to non-null selected threads.
       return action.selectedThreadIndexes;
     case 'SANITIZED_PROFILE_PUBLISHED': {
-      const { oldThreadIndexToNew } = action;
-      if (state === null || !oldThreadIndexToNew) {
+      const { translationMaps } = action;
+      if (
+        state === null ||
+        !translationMaps ||
+        !translationMaps.oldThreadIndexToNew
+      ) {
         // Either there was no selected thread, or the thread indexes were not modified.
         return state;
       }
       const newSelectedThreads = new Set<ThreadIndex>();
+      const { oldThreadIndexToNew } = translationMaps;
       for (const oldThreadIndex of state) {
         const newThreadIndex = oldThreadIndexToNew.get(oldThreadIndex);
         if (newThreadIndex === undefined) {
@@ -185,6 +194,18 @@ const markersSearchString: Reducer<string> = (state = '', action) => {
   }
 };
 
+const markerTableSort: Reducer<SingleColumnSortState[] | null> = (
+  state = null,
+  action
+) => {
+  switch (action.type) {
+    case 'CHANGE_MARKER_TABLE_SORT':
+      return action.sort;
+    default:
+      return state;
+  }
+};
+
 const networkSearchString: Reducer<string> = (state = '', action) => {
   switch (action.type) {
     case 'CHANGE_NETWORK_SEARCH_STRING':
@@ -213,18 +234,25 @@ const transforms: Reducer<TransformStacksPerThread> = (state = {}, action) => {
       });
     }
     case 'SANITIZED_PROFILE_PUBLISHED': {
-      const { oldThreadIndexToNew } = action;
-      if (!oldThreadIndexToNew) {
-        // The thread indexes weren't modified, just return the old value here.
+      const { translationMaps } = action;
+      if (!translationMaps) {
         return state;
       }
-      // This may no longer be valid because of PII sanitization.
+
       const newTransforms = {} as TransformStacksPerThread;
       for (const [threadsKey, transformStack] of objectEntries(state)) {
-        const newThreadIndex = oldThreadIndexToNew.get(Number(threadsKey));
-        if (newThreadIndex !== undefined) {
-          newTransforms[newThreadIndex] = transformStack;
+        const newThreadsKey = translationMaps.oldThreadIndexToNew
+          ? translateThreadsKey(threadsKey, translationMaps.oldThreadIndexToNew)
+          : threadsKey;
+        if (newThreadsKey === null) {
+          // Discard transforms for threads that were removed.
+          continue;
         }
+
+        newTransforms[newThreadsKey] = translateTransformStack(
+          transformStack,
+          translationMaps
+        );
       }
       return newTransforms;
     }
@@ -288,10 +316,30 @@ const lastSelectedCallTreeSummaryStrategy: Reducer<CallTreeSummaryStrategy> = (
   }
 };
 
-const invertCallstack: Reducer<boolean> = (state = false, action) => {
+const invertCallTree: Reducer<boolean> = (state = false, action) => {
   switch (action.type) {
     case 'CHANGE_INVERT_CALLSTACK':
-      return action.invertCallstack;
+      return action.selectedTab === 'calltree' ? action.invertCallstack : state;
+    default:
+      return state;
+  }
+};
+
+const invertFlameGraph: Reducer<boolean> = (state = false, action) => {
+  switch (action.type) {
+    case 'CHANGE_INVERT_CALLSTACK':
+      return action.selectedTab === 'flame-graph'
+        ? action.invertCallstack
+        : state;
+    default:
+      return state;
+  }
+};
+
+const includeIdleSamples: Reducer<boolean> = (state = true, action) => {
+  switch (action.type) {
+    case 'CHANGE_INCLUDE_IDLE_SAMPLES':
+      return action.includeIdleSamples;
     default:
       return state;
   }
@@ -338,9 +386,10 @@ const globalTrackOrder: Reducer<TrackIndex[]> = (state = [], action) => {
     case 'CHANGE_TAB_FILTER':
       return action.globalTrackOrder;
     case 'SANITIZED_PROFILE_PUBLISHED':
-      // If some threads were removed, do not even attempt to figure this out. It's
-      // complicated, and not many people use this feature.
-      return action.oldThreadIndexToNew ? [] : state;
+      // The action carries a track order in the post-sanitization track-index
+      // space when sanitization re-indexed tracks; otherwise it is null and
+      // the existing state remains valid.
+      return action.globalTrackOrder ?? state;
     default:
       return state;
   }
@@ -387,9 +436,10 @@ const hiddenGlobalTracks: Reducer<Set<TrackIndex>> = (
       return hiddenGlobalTracks;
     }
     case 'SANITIZED_PROFILE_PUBLISHED':
-      // If any threads were removed, this was because they were hidden.
-      // Reset this state.
-      return action.oldThreadIndexToNew ? new Set() : state;
+      // The action carries the hidden-track set in the post-sanitization
+      // track-index space when sanitization re-indexed tracks; otherwise it
+      // is null and the existing state remains valid.
+      return action.hiddenGlobalTracks ?? state;
     default:
       return state;
   }
@@ -473,8 +523,10 @@ const hiddenLocalTracksByPid: Reducer<Map<Pid, Set<TrackIndex>>> = (
       return hiddenLocalTracksByPid;
     }
     case 'SANITIZED_PROFILE_PUBLISHED':
-      // If any threads were removed then this information is no longer valid.
-      return action.oldThreadIndexToNew ? new Map() : state;
+      // The action carries the hidden-local-track map in the post-
+      // sanitization track-index space when sanitization re-indexed tracks;
+      // otherwise it is null and the existing state remains valid.
+      return action.hiddenLocalTracksByPid ?? state;
     default:
       return state;
   }
@@ -496,9 +548,10 @@ const localTrackOrderByPid: Reducer<Map<Pid, TrackIndex[]>> = (
       return localTrackOrderByPid;
     }
     case 'SANITIZED_PROFILE_PUBLISHED':
-      // If any threads were removed then remove this information. It's complicated
-      // to compute, and not many people use it.
-      return action.oldThreadIndexToNew ? new Map() : state;
+      // The action carries the local-track order map in the post-sanitization
+      // track-index space when sanitization re-indexed tracks; otherwise it
+      // is null and the existing state remains valid.
+      return action.localTrackOrderByPid ?? state;
     default:
       return state;
   }
@@ -514,10 +567,18 @@ const localTrackOrderChangedPids: Reducer<Set<Pid>> = (
       localTrackOrderChangedPids.add(action.pid);
       return localTrackOrderChangedPids;
     }
-    case 'SANITIZED_PROFILE_PUBLISHED':
-      // In localTrackOrderByPid above the state is reset in this case,
-      // let's reset it here as well.
-      return action.oldThreadIndexToNew ? new Set() : state;
+    case 'SANITIZED_PROFILE_PUBLISHED': {
+      // Drop pids that no longer have a local track order in the sanitized
+      // profile. When sanitization didn't re-index any tracks, the action's
+      // localTrackOrderByPid is null and the existing set remains valid.
+      const newLocalTrackOrderByPid = action.localTrackOrderByPid;
+      if (newLocalTrackOrderByPid === null) {
+        return state;
+      }
+      return new Set(
+        [...state].filter((pid) => newLocalTrackOrderByPid.has(pid))
+      );
+    }
     default:
       return state;
   }
@@ -565,18 +626,38 @@ const profileName: Reducer<string | null> = (state = null, action) => {
 };
 
 const sourceView: Reducer<SourceViewState> = (
-  state = { scrollGeneration: 0, libIndex: null, sourceIndex: null },
+  state = {
+    scrollGeneration: 0,
+    sourceIndex: null,
+    highlightedLine: null,
+  },
   action
 ) => {
   switch (action.type) {
     case 'UPDATE_BOTTOM_BOX': {
+      const shouldScroll = action.scrollToLineNumber !== undefined;
       return {
-        scrollGeneration: state.scrollGeneration + 1,
-        libIndex: action.libIndex,
+        scrollGeneration: shouldScroll
+          ? state.scrollGeneration + 1
+          : state.scrollGeneration,
         sourceIndex: action.sourceIndex,
-        lineNumber: action.lineNumber,
+        scrollToLineNumber: action.scrollToLineNumber,
+        highlightedLine: action.highlightedLineNumber,
       };
     }
+    case 'SANITIZED_PROFILE_PUBLISHED': {
+      if (!action.translationMaps || state.sourceIndex === null) {
+        return state;
+      }
+      const newSourceIndexPlusOne =
+        action.translationMaps.oldSourceToNewSourcePlusOne[state.sourceIndex];
+      return {
+        ...state,
+        sourceIndex:
+          newSourceIndexPlusOne !== 0 ? newSourceIndexPlusOne - 1 : null,
+      };
+    }
+
     default:
       return state;
   }
@@ -584,27 +665,49 @@ const sourceView: Reducer<SourceViewState> = (
 
 const assemblyView: Reducer<AssemblyViewState> = (
   state = {
-    scrollGeneration: 0,
-    nativeSymbol: null,
-    allNativeSymbolsForInitiatingCallNode: [],
     isOpen: false,
+    scrollGeneration: 0,
+    highlightedInstruction: null,
+    nativeSymbols: [],
+    currentNativeSymbol: null,
   },
   action
 ) => {
   switch (action.type) {
     case 'UPDATE_BOTTOM_BOX': {
+      const { nativeSymbols, currentNativeSymbol, shouldOpenAssemblyView } =
+        action;
+      const shouldScroll = action.scrollToInstructionAddress !== undefined;
+
+      // Clamp currentNativeSymbol to null if it is out of bounds, so that
+      // "currentNativeSymbol is always in-bounds or null" holds.
+      const clampedNativeSymbol =
+        currentNativeSymbol !== null &&
+        currentNativeSymbol < nativeSymbols.length
+          ? currentNativeSymbol
+          : null;
+
       return {
-        scrollGeneration: state.scrollGeneration + 1,
-        nativeSymbol: action.nativeSymbol,
-        allNativeSymbolsForInitiatingCallNode:
-          action.allNativeSymbolsForInitiatingCallNode,
-        isOpen: state.isOpen || action.shouldOpenAssemblyView,
+        scrollGeneration: shouldScroll
+          ? state.scrollGeneration + 1
+          : state.scrollGeneration,
+        nativeSymbols,
+        currentNativeSymbol: clampedNativeSymbol,
+        isOpen: state.isOpen || shouldOpenAssemblyView,
+        scrollToInstructionAddress: action.scrollToInstructionAddress,
+        highlightedInstruction: action.highlightedInstructionAddress,
       };
     }
     case 'OPEN_ASSEMBLY_VIEW': {
       return {
         ...state,
         isOpen: true,
+      };
+    }
+    case 'CHANGE_ASSEMBLY_VIEW_NATIVE_SYMBOL_ENTRY_INDEX': {
+      return {
+        ...state,
+        currentNativeSymbol: action.entryIndex,
       };
     }
     case 'CLOSE_ASSEMBLY_VIEW': {
@@ -648,11 +751,39 @@ const isBottomBoxOpenPerPanel: Reducer<IsOpenPerPanelState> = (
   }
 };
 
+const isBottomBoxFullscreen: Reducer<boolean> = (state = false, action) => {
+  switch (action.type) {
+    case 'TOGGLE_BOTTOM_BOX_FULLSCREEN': {
+      return !state;
+    }
+    default:
+      return state;
+  }
+};
+
 /**
  * This value is only set from the URL and never changed.
  */
 const symbolServerUrl: Reducer<string | null> = (state = null) => {
   return state;
+};
+
+const selectedMarkers: Reducer<SelectedMarkersPerThread> = (
+  state = {},
+  action
+): SelectedMarkersPerThread => {
+  switch (action.type) {
+    case 'CHANGE_SELECTED_MARKER': {
+      const { threadsKey, selectedMarker } = action;
+      // Store the selected marker for this specific threadsKey
+      return {
+        ...state,
+        [threadsKey]: selectedMarker,
+      };
+    }
+    default:
+      return state;
+  }
 };
 
 /**
@@ -662,7 +793,9 @@ const profileSpecific = combineReducers({
   selectedThreads,
   implementation,
   lastSelectedCallTreeSummaryStrategy,
-  invertCallstack,
+  invertCallTree,
+  invertFlameGraph,
+  includeIdleSamples,
   showUserTimings,
   stackChartSameWidths,
   committedRanges,
@@ -673,6 +806,7 @@ const profileSpecific = combineReducers({
   sourceView,
   assemblyView,
   isBottomBoxOpenPerPanel,
+  isBottomBoxFullscreen,
   timelineType,
   globalTrackOrder,
   hiddenGlobalTracks,
@@ -681,6 +815,8 @@ const profileSpecific = combineReducers({
   localTrackOrderChangedPids,
   showJsTracerSummary,
   tabFilter,
+  selectedMarkers,
+  markerTableSort,
   // The timeline tracks used to be hidden and sorted by thread indexes, rather than
   // track indexes. The only way to migrate this information to tracks-based data is to
   // first retrieve the profile, so they can't be upgraded by the normal url upgrading

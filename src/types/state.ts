@@ -12,6 +12,7 @@ import type {
   TrackReference,
   TimelineType,
   CheckedSharingOptions,
+  SharingMode,
   LastNonShiftClickInformation,
 } from './actions';
 import type { TabSlug } from '../app-logic/tabs-handling';
@@ -21,7 +22,6 @@ import type {
   ThreadIndex,
   Pid,
   TabID,
-  IndexIntoLibs,
   IndexIntoSourceTable,
 } from './profile';
 
@@ -36,6 +36,7 @@ import type {
 } from './profile-derived';
 import type { Attempt } from '../utils/errors';
 import type { TransformStacksPerThread } from './transforms';
+import type { SingleColumnSortState } from '../components/shared/TreeView';
 import type JSZip from 'jszip';
 import type { IndexIntoZipFileTable } from '../profile-logic/zip-files';
 import type { PathSet } from '../utils/path';
@@ -51,13 +52,20 @@ export type Reducer<T> = (state: T | undefined, action: Action) => T;
 export type UploadedProfileInformation = ImportedUploadedProfileInformation;
 
 export type SymbolicationStatus = 'DONE' | 'SYMBOLICATING';
+export type SourceMapSymbolicationStatus =
+  | 'INACTIVE'
+  | 'FETCHING'
+  | 'SYMBOLICATING';
 export type ThreadViewOptions = {
   readonly selectedNonInvertedCallNodePath: CallNodePath;
   readonly selectedInvertedCallNodePath: CallNodePath;
   readonly expandedNonInvertedCallNodePaths: PathSet;
   readonly expandedInvertedCallNodePaths: PathSet;
-  readonly selectedMarker: MarkerIndex | null;
   readonly selectedNetworkMarker: MarkerIndex | null;
+  // Track the number of transforms to detect when they change via browser
+  // navigation. This helps us know when to reset paths that may be invalid
+  // in the new transform state.
+  readonly lastSeenTransformCount: number;
 };
 
 export type ThreadViewOptionsPerThreads = {
@@ -80,6 +88,10 @@ export type MarkerReference = {
   readonly markerIndex: MarkerIndex;
 };
 
+export type SelectedMarkersPerThread = {
+  [key: ThreadsKey]: MarkerIndex | null;
+};
+
 /**
  * Profile view state
  */
@@ -87,6 +99,7 @@ export type ProfileViewState = {
   readonly viewOptions: {
     perThread: ThreadViewOptionsPerThreads;
     symbolicationStatus: SymbolicationStatus;
+    sourceMapSymbolicationStatus: SourceMapSymbolicationStatus;
     waitingForLibs: Set<RequestedLib>;
     previewSelection: PreviewSelection | null;
     scrollToSelectionGeneration: number;
@@ -179,7 +192,6 @@ export type AppState = {
   readonly hasZoomedViaMousewheel: boolean;
   readonly isSidebarOpenPerPanel: IsOpenPerPanelState;
   readonly sidebarOpenCategories: Map<string, Set<number>>;
-  readonly panelLayoutGeneration: number;
   readonly lastVisibleThreadTabSlug: TabSlug;
   readonly trackThreadHeights: Record<ThreadsKey, CssPixels>;
   readonly isNewlyPublished: boolean;
@@ -205,11 +217,19 @@ export type UploadState = {
   generation: number;
 };
 
+export type ProfileEncodingResult =
+  | { type: 'SUCCESS'; profileData: Blob }
+  | { type: 'ERROR'; error: Error };
+
 export type SanitizedProfileEncodingState =
   | {
       phase: 'INITIAL';
     }
-  | { phase: 'ENCODING'; sanitizedProfile: Profile }
+  | {
+      phase: 'ENCODING';
+      sanitizedProfile: Profile;
+      encodingPromise: Promise<ProfileEncodingResult>;
+    }
   | {
       phase: 'DONE';
       sanitizedProfile: Profile;
@@ -218,7 +238,7 @@ export type SanitizedProfileEncodingState =
   | { phase: 'ERROR'; sanitizedProfile: Profile; error: Error };
 
 export type PublishState = {
-  readonly checkedSharingOptions: CheckedSharingOptions;
+  readonly checkedSharingOptions: Record<SharingMode, CheckedSharingOptions>;
   readonly sanitizedProfileEncodingState: SanitizedProfileEncodingState;
   readonly upload: UploadState;
   readonly isHidingStaleProfile: boolean;
@@ -237,19 +257,13 @@ export type ZippedProfilesState = {
 
 export type SourceViewState = {
   scrollGeneration: number;
-  // Non-null if this source file was opened for a function from native code.
-  // In theory, multiple different libraries can have source files with the same
-  // path but different content.
-  // Null if the source file is not for native code or if the lib is not known,
-  // for example if the source view was opened via the URL (the source URL param
-  // currently discards the libIndex).
-  libIndex: IndexIntoLibs | null;
+  // Optional line number to scroll to in the source view.
+  scrollToLineNumber?: number;
   // Index into source table. Contains information (filename and uuid) about the
   // source. Null if a function without a file path was double clicked.
   sourceIndex: IndexIntoSourceTable | null;
-  // Optional line number to scroll to in the source view.
-  // If not specified, the source view will scroll to the hottest line.
-  lineNumber?: number;
+  // The line number of the highlighted line in the source view.
+  highlightedLine: number | null;
 };
 
 export type AssemblyViewState = {
@@ -258,15 +272,17 @@ export type AssemblyViewState = {
   isOpen: boolean;
   // When this is incremented, the assembly view scrolls to the "hotspot" line.
   scrollGeneration: number;
-  // The native symbol for which the assembly code is being shown at the moment.
-  // Null if the initiating call node did not have a native symbol.
-  nativeSymbol: NativeSymbolInfo | null;
-  // The set of native symbols which contributed samples to the initiating call
-  // node. Often, this will just be one element (the same as `nativeSymbol`),
-  // but it can also be multiple elements, for example when double-clicking a
-  // function like `Vec::push` in an inverted call tree, if that function has
-  // been inlined into multiple different callers.
-  allNativeSymbolsForInitiatingCallNode: NativeSymbolInfo[];
+  // Optional instruction address to scroll to in the assembly view.
+  scrollToInstructionAddress?: number;
+  // The address of the highlighted instruction in the assembly view.
+  highlightedInstruction: number | null;
+  // The list of native symbols whose assembly code should be accessible in the
+  // assembly view. Often empty or just one element, but sometimes this can have
+  // multiple elements, for example the different JIT compilations of one JS function.
+  nativeSymbols: NativeSymbolInfo[];
+  // The index in `nativeSymbols` for the symbol whose assembly code is being shown at the moment.
+  // Null if nativeSymbols is empty.
+  currentNativeSymbol: number | null;
 };
 
 export type DecodedInstruction = {
@@ -345,7 +361,9 @@ export type ProfileSpecificUrlState = {
   selectedThreads: Set<ThreadIndex> | null;
   implementation: ImplementationFilter;
   lastSelectedCallTreeSummaryStrategy: CallTreeSummaryStrategy;
-  invertCallstack: boolean;
+  invertCallTree: boolean;
+  invertFlameGraph: boolean;
+  includeIdleSamples: boolean;
   showUserTimings: boolean;
   stackChartSameWidths: boolean;
   committedRanges: StartEndRange[];
@@ -357,6 +375,7 @@ export type ProfileSpecificUrlState = {
   sourceView: SourceViewState;
   assemblyView: AssemblyViewState;
   isBottomBoxOpenPerPanel: IsOpenPerPanelState;
+  isBottomBoxFullscreen: boolean;
   globalTrackOrder: TrackIndex[];
   hiddenGlobalTracks: Set<TrackIndex>;
   hiddenLocalTracksByPid: Map<Pid, Set<TrackIndex>>;
@@ -366,6 +385,8 @@ export type ProfileSpecificUrlState = {
   tabFilter: TabID | null;
   legacyThreadOrder: ThreadIndex[] | null;
   legacyHiddenThreads: ThreadIndex[] | null;
+  selectedMarkers: SelectedMarkersPerThread;
+  markerTableSort: SingleColumnSortState[] | null;
 };
 
 export type UrlState = {

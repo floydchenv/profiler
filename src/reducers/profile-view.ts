@@ -20,6 +20,7 @@ import type {
   Reducer,
   ProfileViewState,
   SymbolicationStatus,
+  SourceMapSymbolicationStatus,
   ThreadViewOptions,
   ThreadViewOptionsPerThreads,
   TableViewOptionsPerTab,
@@ -51,8 +52,37 @@ const profile: Reducer<Profile | null> = (state = null, action) => {
       if (!state.threads.length) {
         return state;
       }
-      const { symbolicatedThreads } = action;
-      return { ...state, threads: symbolicatedThreads };
+      const { symbolicatedShared, symbolicatedThreads } = action;
+      return {
+        ...state,
+        shared: symbolicatedShared,
+        threads: symbolicatedThreads,
+      };
+    }
+    case 'BULK_SOURCE_MAP_SYMBOLICATION': {
+      if (state === null) {
+        throw new Error(
+          'Assumed that a profile would be loaded for JS source map symbolication.'
+        );
+      }
+      const {
+        newFuncTable,
+        newFrameTable,
+        newSourceLocationTable,
+        newSources,
+        newStringArray,
+      } = action;
+      return {
+        ...state,
+        shared: {
+          ...state.shared,
+          funcTable: newFuncTable,
+          frameTable: newFrameTable,
+          sourceLocationTable: newSourceLocationTable,
+          sources: newSources,
+          stringArray: newStringArray,
+        },
+      };
     }
     case 'DONE_SYMBOLICATING': {
       if (state === null) {
@@ -132,13 +162,34 @@ const symbolicationStatus: Reducer<SymbolicationStatus> = (
   }
 };
 
+const sourceMapSymbolicationStatus: Reducer<SourceMapSymbolicationStatus> = (
+  state = 'INACTIVE',
+  action
+) => {
+  switch (action.type) {
+    case 'START_SOURCE_MAP_FETCHING':
+      return 'FETCHING';
+    case 'START_SOURCE_MAP_SYMBOLICATION':
+      return 'SYMBOLICATING';
+    // Fetching done but worker not yet started. Go back to INACTIVE.
+    // The next START_SOURCE_MAP_SYMBOLICATION will set it to SYMBOLICATING.
+    case 'DONE_SOURCE_MAP_FETCHING':
+      return state === 'FETCHING' ? 'INACTIVE' : state;
+    case 'BULK_SOURCE_MAP_SYMBOLICATION':
+    case 'SOURCE_MAP_SYMBOLICATION_FAILED':
+      return 'INACTIVE';
+    default:
+      return state;
+  }
+};
+
 export const defaultThreadViewOptions: ThreadViewOptions = {
   selectedNonInvertedCallNodePath: [],
   selectedInvertedCallNodePath: [],
   expandedNonInvertedCallNodePaths: new PathSet(),
   expandedInvertedCallNodePaths: new PathSet(),
-  selectedMarker: null,
   selectedNetworkMarker: null,
+  lastSeenTransformCount: 0,
 };
 
 function _getThreadViewOptions(
@@ -174,26 +225,8 @@ const viewOptionsPerThread: Reducer<ThreadViewOptionsPerThreads> = (
       // The view options are lazily initialized. Reset to the default values.
       return {};
     case 'BULK_SYMBOLICATION': {
-      const { oldFuncToNewFuncsMaps } = action;
-      // For each thread, apply oldFuncToNewFuncsMap to that thread's
-      // selectedCallNodePath and expandedCallNodePaths.
-      const newState = objectMap(state, (threadViewOptions, threadsKey) => {
-        // Multiple selected threads are not supported, note that transforming
-        // the threadKey with multiple threads into a number will result in a NaN.
-        // This should be fine here, as the oldFuncToNewFuncsMaps only supports
-        // single thread indexes.
-        const threadIndex = +threadsKey;
-        if (Number.isNaN(threadIndex)) {
-          throw new Error(
-            'Bulk symbolication only supports a single thread, and a ThreadsKey with ' +
-              'multiple threads was used.'
-          );
-        }
-        const oldFuncToNewFuncsMap = oldFuncToNewFuncsMaps.get(threadIndex);
-        if (oldFuncToNewFuncsMap === undefined) {
-          return threadViewOptions;
-        }
-
+      const { oldFuncToNewFuncsMap } = action;
+      const newState = objectMap(state, (threadViewOptions) => {
         return {
           ...threadViewOptions,
           selectedNonInvertedCallNodePath: applyFuncSubstitutionToCallPath(
@@ -327,10 +360,6 @@ const viewOptionsPerThread: Reducer<ThreadViewOptionsPerThreads> = (
           : { expandedNonInvertedCallNodePaths: expandedCallNodePaths }
       );
     }
-    case 'CHANGE_SELECTED_MARKER': {
-      const { threadsKey, selectedMarker } = action;
-      return _updateThreadViewOptions(state, threadsKey, { selectedMarker });
-    }
     case 'CHANGE_SELECTED_NETWORK_MARKER': {
       const { threadsKey, selectedNetworkMarker } = action;
       return _updateThreadViewOptions(state, threadsKey, {
@@ -378,11 +407,15 @@ const viewOptionsPerThread: Reducer<ThreadViewOptionsPerThreads> = (
         threadViewOptions.expandedInvertedCallNodePaths
       );
 
+      const lastSeenTransformCount =
+        threadViewOptions.lastSeenTransformCount + 1;
+
       return _updateThreadViewOptions(state, threadsKey, {
         selectedNonInvertedCallNodePath,
         selectedInvertedCallNodePath,
         expandedNonInvertedCallNodePaths,
         expandedInvertedCallNodePaths,
+        lastSeenTransformCount,
       });
     }
     case 'POP_TRANSFORMS_FROM_STACK': {
@@ -394,6 +427,38 @@ const viewOptionsPerThread: Reducer<ThreadViewOptionsPerThreads> = (
         selectedInvertedCallNodePath: [],
         expandedNonInvertedCallNodePaths: new PathSet(),
         expandedInvertedCallNodePaths: new PathSet(),
+        lastSeenTransformCount: 0,
+      });
+    }
+    case 'UPDATE_URL_STATE': {
+      // When the URL state changes (e.g., via browser back button), check if the
+      // transform stack has been popped for each thread. If so, reset the stored paths
+      // because they may reference call nodes that only exist in a transformed tree.
+      // See: https://github.com/firefox-devtools/profiler/issues/5689
+      if (!action.newUrlState) {
+        return state;
+      }
+
+      const { transforms } = action.newUrlState.profileSpecific;
+      return objectMap(state, (viewOptions, threadsKey) => {
+        const transformStack = transforms[threadsKey] || [];
+        const newTransformCount = transformStack.length;
+        const oldTransformCount = viewOptions.lastSeenTransformCount;
+
+        // If transform count changed, reset the paths.
+        if (newTransformCount < oldTransformCount) {
+          return {
+            ...viewOptions,
+            selectedNonInvertedCallNodePath: [],
+            selectedInvertedCallNodePath: [],
+            expandedNonInvertedCallNodePaths: new PathSet(),
+            expandedInvertedCallNodePaths: new PathSet(),
+            lastSeenTransformCount: newTransformCount,
+          };
+        }
+
+        // No change needed.
+        return viewOptions;
       });
     }
     case 'CHANGE_IMPLEMENTATION_FILTER': {
@@ -681,17 +746,10 @@ const rightClickedCallNode: Reducer<RightClickedCallNode | null> = (
         return null;
       }
 
-      const { oldFuncToNewFuncsMaps } = action;
-      // This doesn't support a ThreadsKey with multiple threads.
-      const oldFuncToNewFuncsMap = oldFuncToNewFuncsMaps.get(+state.threadsKey);
-      if (oldFuncToNewFuncsMap === undefined) {
-        return state;
-      }
-
       return {
         ...state,
         callNodePath: applyFuncSubstitutionToCallPath(
-          oldFuncToNewFuncsMap,
+          action.oldFuncToNewFuncsMap,
           state.callNodePath
         ),
       };
@@ -815,6 +873,7 @@ const profileViewReducer: Reducer<ProfileViewState> = wrapReducerInResetter(
     viewOptions: combineReducers({
       perThread: viewOptionsPerThread,
       symbolicationStatus,
+      sourceMapSymbolicationStatus,
       waitingForLibs,
       previewSelection,
       scrollToSelectionGeneration,

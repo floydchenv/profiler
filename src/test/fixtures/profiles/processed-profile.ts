@@ -5,13 +5,25 @@ import {
   getEmptyProfile,
   getEmptyThread,
   getEmptyJsTracerTable,
-  resourceTypes,
-  getEmptyJsAllocationsTable,
-  getEmptyUnbalancedNativeAllocationsTable,
-  getEmptyBalancedNativeAllocationsTable,
+  getEmptyRawJsAllocationsTable,
+  getEmptyRawUnbalancedNativeAllocationsTable,
+  getEmptyRawBalancedNativeAllocationsTable,
+  getRawStackTableBuilderWithExistingContents,
+  finishRawBalancedNativeAllocationsTableBuilder,
+  finishRawFrameTableBuilder,
+  finishRawJsAllocationsTableBuilder,
+  finishRawSamplesTableBuilder,
+  finishRawUnbalancedNativeAllocationsTableBuilder,
+  getRawSamplesTableBuilderFromExisting,
+  getRawMarkerTableBuilderFromExisting,
+  finishRawMarkerTableBuilder,
+  finishRawStackTableBuilder,
+  getRawFrameTableBuilderWithExistingContents,
+  getRawSamplesTableBuilderWithEventDelay,
 } from '../../../profile-logic/data-structures';
 import { mergeProfilesForDiffing } from '../../../profile-logic/merge-compare';
 import { computeReferenceCPUDeltaPerMs } from '../../../profile-logic/cpu';
+import { deriveCounterDisplay } from '../../../profile-logic/process-profile';
 import { stateFromLocation } from '../../../app-logic/url-handling';
 import { StringTable } from '../../../utils/string-table';
 import { computeThreadFromRawThread } from '../utils';
@@ -51,6 +63,7 @@ import type {
   MarkerSchema,
   MixedObject,
 } from 'firefox-profiler/types';
+import { FrameFlag } from 'firefox-profiler/types';
 import {
   deriveMarkersFromRawMarkerTable,
   IPCMarkerCorrelations,
@@ -117,7 +130,7 @@ export function addRawMarkersToThread(
   markers: TestDefinedRawMarker[]
 ) {
   const stringTable = StringTable.withBackingArray(shared.stringArray);
-  const markersTable = thread.markers;
+  const markersTable = getRawMarkerTableBuilderFromExisting(thread.markers);
 
   for (const { name, startTime, endTime, phase, category, data } of markers) {
     markersTable.name.push(
@@ -130,6 +143,8 @@ export function addRawMarkersToThread(
     markersTable.category.push(category || 0);
     markersTable.length++;
   }
+
+  thread.markers = finishRawMarkerTableBuilder(markersTable);
 }
 
 // This function is called with test-defined payloads. For convenience, we allow
@@ -170,7 +185,7 @@ export function addMarkersToThreadWithCorrespondingSamples(
   markers: TestDefinedMarker[]
 ) {
   const stringTable = StringTable.withBackingArray(shared.stringArray);
-  const markersTable = thread.markers;
+  const markersTable = getRawMarkerTableBuilderFromExisting(thread.markers);
   const allTimes = new Set<number>();
 
   markers.forEach((tuple) => {
@@ -207,7 +222,7 @@ export function addMarkersToThreadWithCorrespondingSamples(
   // control the initial range. Because of that we need to add samples so that
   // the range includes these markers. Note that when a thread has no sample,
   // then the markers are used to compute the initial range.
-  const { samples } = thread;
+  const samples = getRawSamplesTableBuilderFromExisting(thread.samples);
   if (samples.length) {
     const firstMarkerTime = Math.min(...allTimes);
     const lastMarkerTime = Math.max(...allTimes);
@@ -253,6 +268,8 @@ export function addMarkersToThreadWithCorrespondingSamples(
       samples.length++;
     }
   }
+  thread.samples = finishRawSamplesTableBuilder(samples);
+  thread.markers = finishRawMarkerTableBuilder(markersTable);
 }
 
 export function getThreadWithMarkers(
@@ -355,17 +372,30 @@ export function makeIntervalMarker(
  * A utility to make TestDefinedRawMarker
  */
 export function makeCompositorScreenshot(
-  startTime: Milliseconds
+  startTime: Milliseconds,
+  windowID: string = '0'
 ): TestDefinedRawMarker {
   return {
-    ...makeInstantMarker('CompositorScreenshot', startTime),
+    ...makeStartMarker(`CompositorScreenshot ${windowID}`, startTime),
     data: {
       type: 'CompositorScreenshot',
       url: 0,
-      windowID: '',
-      windowWidth: 100,
-      windowHeight: 100,
+      windowID,
+      windowSize: { width: 300, height: 150 },
     },
+  };
+}
+
+/**
+ * A utility to make TestDefinedRawMarker
+ */
+export function makeCompositorScreenshotEnd(
+  endTime: Milliseconds,
+  windowID: string = '0'
+): TestDefinedRawMarker {
+  return {
+    ...makeEndMarker(`CompositorScreenshot ${windowID}`, endTime),
+    data: { type: 'CompositorScreenshot', windowID },
   };
 }
 
@@ -404,7 +434,54 @@ export function getProfileWithMarkers(
     ...getThreadWithMarkers(profile.shared, testDefinedMarkers),
     tid: i,
   }));
+  addCompositorScreenshotSchemaIfNeeded(profile);
   return profile;
+}
+
+export function getProfileWithRawMarkers(
+  ...markersPerThread: TestDefinedRawMarker[][]
+): Profile {
+  const profile = getEmptyProfile();
+  profile.meta.markerSchema = markerSchemaForTests;
+
+  profile.threads = markersPerThread.map((markers, i) => ({
+    ...getThreadWithRawMarkers(profile.shared, markers),
+    tid: i,
+  }));
+  addCompositorScreenshotSchemaIfNeeded(profile);
+  return profile;
+}
+
+export const compositorScreenshotMarkerSchema: MarkerSchema = {
+  name: 'CompositorScreenshot',
+  display: ['marker-chart', 'marker-table', 'timeline-screenshots'],
+  fields: [
+    {
+      key: 'url',
+      label: 'Image',
+      format: {
+        type: 'screenshot-data-url',
+        sizeFieldForAspectRatio: 'windowSize',
+      },
+    },
+    { key: 'windowSize', label: 'Window Size', format: 'screenshot-size' },
+    { key: 'windowID', label: 'Window ID', format: 'string' },
+  ],
+  description:
+    'This marker spans the time between each composite of a window and shows the window contents during that time.',
+};
+
+export function addCompositorScreenshotSchemaIfNeeded(profile: Profile): void {
+  if (
+    profile.threads.some((thread) =>
+      thread.markers.data.some((data) => data?.type === 'CompositorScreenshot')
+    )
+  ) {
+    profile.meta.markerSchema = [
+      ...profile.meta.markerSchema,
+      compositorScreenshotMarkerSchema,
+    ];
+  }
 }
 
 /**
@@ -569,66 +646,69 @@ export type ProfileWithDicts = {
  *
  * The following func and frame attributes are supported:
  *  - [cat:*] - The category name, affects frameTable.category
- *  - [lib:*] - The library name, affects funcTable.resource + resourceTable + libs
- *  - [file:*] - The filename, affects funcTable.file
+ *  - [lib:*] - The library name, affects frameTable.lib + funcTable.resource + resourceTable + libs
+ *  - [file:*] - The filename, affects funcTable.source + sourceTable
  *  - [line:*] - The line, affects frameTable.line
  *  - [address:*] - The frame address, affects frameTable.address
- *  - [inl:*] - The inline depth, affects frameTable.inlineDepth
+ *  - [inl:*] - A non-zero value marks the frame as inlined, i.e. it sets the IsInlined bit of frameTable.flags
  *  - [sym:<name>:<hex_address>:<hex_size>] - The native symbol, affects frameTable.nativeSymbol (keyed on <name>)
 
 ```js
 // Execute the code below in the web console in the profiler to get a stack that's
 // ready to be pasted into getProfileFromTextSamples.
 
-function getFrame(
-  { stackTable, frameTable, funcTable, stringTable, resourceTable, nativeSymbols, libs },
-  frameIndex
-) {
+// See FrameFlag in src/types/profile.ts.
+const IsInlined = 1 << 0;
+const HasAddress = 1 << 1;
+const HasNativeSymbol = 1 << 3;
+const HasLine = 1 << 4;
+
+function getFrame(profile, thread, frameIndex) {
+  const { libs, shared } = profile;
+  const { stringArray, sources } = shared;
+  const { frameTable, funcTable, nativeSymbols } = thread;
+  const flags = frameTable.flags[frameIndex];
   const funcIndex = frameTable.func[frameIndex];
-  let s = stringTable.getString(funcTable.name[funcIndex]);
-  const libIndex = resourceTable.lib[funcTable.resource[funcIndex]];
-  if (libIndex !== null) {
-    const libName = libs[libIndex].name;
-    s += `[lib:${libName}]`;
+  let s = stringArray[funcTable.name[funcIndex]];
+  if (flags & HasAddress) {
+    s += `[lib:${libs[frameTable.lib[frameIndex]].name}]`;
   }
-  const fileStringIndex = funcTable.fileName[funcIndex];
-  if (fileStringIndex !== null) {
-    s += `[file:${stringTable.getString(fileStringIndex)}]`;
+  const sourceIndex = funcTable.source[funcIndex];
+  if (sourceIndex !== null) {
+    s += `[file:${stringArray[sources.filename[sourceIndex]]}]`;
   }
-  const line = frameTable.line[frameIndex];
-  if (line !== null) {
-    s += `[line:${line}]`;
+  if (flags & HasLine) {
+    s += `[line:${frameTable.line[frameIndex]}]`;
   }
-  const address = frameTable.address[frameIndex];
-  if (address !== -1) {
-    s += `[address:${address.toString(16)}]`;
+  if (flags & HasAddress) {
+    s += `[address:${frameTable.address[frameIndex].toString(16)}]`;
   }
-  const nativeSymbol = frameTable.nativeSymbol[frameIndex];
-  if (nativeSymbol !== null) {
-    const symName = stringTable.getString(nativeSymbols.name[nativeSymbol]);
+  if (flags & HasNativeSymbol) {
+    const nativeSymbol = frameTable.nativeSymbol[frameIndex];
+    const symName = stringArray[nativeSymbols.name[nativeSymbol]];
     const symAddrStr = nativeSymbols.address[nativeSymbol].toString(16);
     const functionSize = nativeSymbols.functionSize[nativeSymbol];
-    cost symSizeStr = functionSize !== null ? functionSize.toString(16) : '';
+    const symSizeStr = functionSize !== null ? functionSize.toString(16) : '';
     s += `[sym:${symName}:${symAddrStr}:${symSizeStr}]`;
   }
-  const inlineDepth = frameTable.inlineDepth[frameIndex];
-  if (inlineDepth !== 0) {
-    s += `[inl:${inlineDepth}]`;
+  if (flags & IsInlined) {
+    s += `[inl:1]`;
   }
   return s;
 }
 
-function getStack(thread, stackIndex) {
+function getStack(profile, thread, stackIndex) {
   const { stackTable } = thread;
   const stack = [];
-  while (stackIndex !== null) {
-    stack.unshift(getFrame(thread, stackTable.frame[stackIndex]));
+  // samples.stack can be null; stackTable.prefix uses -1 for roots.
+  while (stackIndex !== null && stackIndex !== -1) {
+    stack.unshift(getFrame(profile, thread, stackTable.frame[stackIndex]));
     stackIndex = stackTable.prefix[stackIndex];
   }
   return stack;
 }
 
-getStack(filteredThread, filteredThread.samples.stack[0])
+getStack(profile, filteredThread, filteredThread.samples.stack[0])
 ```
 */
 export function getProfileFromTextSamples(
@@ -664,21 +744,9 @@ export function getProfileFromTextSamples(
       }
     }
 
-    // Flatten the textOnlyStacks into into a list of function names.
-    const funcNamesSet = new Set<string>();
-    const removeModifiers = /\[.*/;
-    for (let i = 0; i < textOnlyStacks.length; i++) {
-      const textOnlyStack = textOnlyStacks[i];
-      for (let j = 0; j < textOnlyStack.length; j++) {
-        funcNamesSet.add(textOnlyStack[j].replace(removeModifiers, ''));
-      }
-    }
-    const funcNames = [...funcNamesSet];
-
     // Turn this into a real thread.
     const thread = _buildThreadFromTextOnlyStacks(
       textOnlyStacks,
-      funcNames,
       categories,
       globalDataCollector,
       sampleTimes
@@ -880,86 +948,56 @@ function _findNativeSymbolNameFromFuncName(
 
 function _buildThreadFromTextOnlyStacks(
   textOnlyStacks: Array<string[]>,
-  funcNames: Array<string>,
   categories: CategoryList,
   globalDataCollector: GlobalDataCollector,
   sampleTimes: number[] | null
 ): RawThread {
   const thread = getEmptyThread();
 
-  const {
-    funcTable,
-    frameTable,
-    stackTable,
-    samples,
-    resourceTable,
-    nativeSymbols,
-  } = thread;
+  const samples = getRawSamplesTableBuilderWithEventDelay();
   const stringTable = globalDataCollector.getStringTable();
 
-  // Create the FuncTable.
-  funcNames.forEach((funcName) => {
-    funcTable.name.push(stringTable.indexForString(funcName));
-    funcTable.source.push(null);
-    funcTable.relevantForJS.push(funcName.endsWith('-relevantForJS'));
-    funcTable.isJS.push(_isJsFunctionName(funcName));
-    funcTable.lineNumber.push(null);
-    funcTable.columnNumber.push(null);
-    // The resource column will be filled in the loop below.
-    funcTable.length++;
-  });
-
-  // This map caches resource indexes for library names.
-  const resourceIndexCache = new Map<string, number>();
+  const frameTable = globalDataCollector.getFrameTable();
 
   // Create the samples, stacks, and frames.
   textOnlyStacks.forEach((column, columnIndex) => {
     let prefix: IndexIntoStackTable | null = null;
     column.forEach((funcNameWithModifier) => {
       const funcName = funcNameWithModifier.replace(/\[.*/, '');
-      const funcIndex = funcTable.name.indexOf(
-        stringTable.indexForString(funcName)
-      );
 
       // Find the library name from the function name and create an entry if needed.
       const libraryName = _findLibNameFromFuncName(funcNameWithModifier);
       let resourceIndex = -1;
       let libIndex = null;
-      if (libraryName) {
-        resourceIndex = resourceIndexCache.get(libraryName) ?? -1;
-        if (resourceIndex === -1) {
-          libIndex = globalDataCollector.indexForLib({
-            arch: '',
-            name: libraryName,
-            path: '/path/to/' + libraryName,
-            debugName: libraryName,
-            debugPath: '/path/to/' + libraryName,
-            breakpadId: 'SOMETHING_FAKE',
-            codeId: null,
-          });
-
-          resourceTable.lib.push(libIndex);
-          resourceTable.name.push(stringTable.indexForString(libraryName));
-          resourceTable.type.push(resourceTypes.library);
-          resourceTable.host.push(null);
-          resourceIndex = resourceTable.length++;
-
-          resourceIndexCache.set(libraryName, resourceIndex);
-        } else {
-          libIndex = resourceTable.lib[resourceIndex];
-        }
+      if (libraryName !== null) {
+        libIndex = globalDataCollector.indexForLib({
+          arch: '',
+          name: libraryName,
+          path: '/path/to/' + libraryName,
+          debugName: libraryName,
+          debugPath: '/path/to/' + libraryName,
+          breakpadId: 'SOMETHING_FAKE',
+          codeId: null,
+        });
+        resourceIndex = globalDataCollector.indexForLibResourceByLib(libIndex);
       }
-
-      funcTable.resource[funcIndex] = resourceIndex;
 
       // Find the file name from the function name
+      let source = null;
       const fileName = _findFileNameFromFuncName(funcNameWithModifier);
       if (fileName) {
-        funcTable.source[funcIndex] = globalDataCollector.indexForSource(
-          null,
-          fileName
-        );
+        source = globalDataCollector.indexForSource(null, fileName);
       }
+
+      const funcIndex = globalDataCollector.indexForFunc(
+        stringTable.indexForString(funcName),
+        _isJsFunctionName(funcName),
+        funcName.endsWith('-relevantForJS'),
+        resourceIndex,
+        source,
+        null,
+        null
+      );
 
       const category = _findCategoryFromFuncName(
         funcNameWithModifier,
@@ -967,36 +1005,64 @@ function _buildThreadFromTextOnlyStacks(
         categories
       );
       const lineNumber = _findLineNumberFromFuncName(funcNameWithModifier);
-      const address =
+      const parsedAddress =
         _findAddressFromFuncName(funcNameWithModifier) ??
         (funcName.startsWith('0x') ? parseInt(funcName.substr(2), 16) : -1);
 
-      let nativeSymbol = null;
+      let nativeSymbol: number | null = null;
       const nativeSymbolInfo =
         _findNativeSymbolNameFromFuncName(funcNameWithModifier);
       if (nativeSymbolInfo) {
-        const nativeSymbolNameStringIndex = stringTable.indexForString(
-          nativeSymbolInfo.name
-        );
-        const nativeSymbolIndex = nativeSymbols.name.indexOf(
-          nativeSymbolNameStringIndex
-        );
-        if (nativeSymbolIndex !== -1) {
-          nativeSymbol = nativeSymbolIndex;
-        } else if (libIndex !== null) {
-          nativeSymbol = nativeSymbols.length++;
-          nativeSymbols.libIndex.push(libIndex);
-          nativeSymbols.address.push(nativeSymbolInfo.address);
-          nativeSymbols.name.push(nativeSymbolNameStringIndex);
-          nativeSymbols.functionSize.push(nativeSymbolInfo.functionSize);
-        } else {
+        if (libIndex === null) {
           throw new Error(
             `[sym:] has to be used together with [lib:] - missing lib in "${funcNameWithModifier}"`
           );
         }
+        const nativeSymbolNameStringIndex = stringTable.indexForString(
+          nativeSymbolInfo.name
+        );
+        nativeSymbol = globalDataCollector.indexForNativeSymbol(
+          libIndex,
+          nativeSymbolInfo.address,
+          nativeSymbolNameStringIndex,
+          nativeSymbolInfo.functionSize
+        );
       }
       const inlineDepth =
         _findInlineDepthFromFuncName(funcNameWithModifier) ?? 0;
+
+      if (parsedAddress !== -1 && libIndex === null) {
+        throw new Error(
+          `An address has to be used together with [lib:], because the address is relative to the lib - missing lib in "${funcNameWithModifier}"`
+        );
+      }
+
+      let flags = 0;
+      if (inlineDepth > 0) {
+        flags |= FrameFlag.IsInlined;
+      }
+      if (parsedAddress !== -1) {
+        flags |= FrameFlag.HasAddress;
+      }
+      if (category !== null) {
+        flags |= FrameFlag.HasCategory;
+      }
+      if (nativeSymbol !== null) {
+        flags |= FrameFlag.HasNativeSymbol;
+      }
+      if (lineNumber !== null) {
+        flags |= FrameFlag.HasLine;
+      }
+      const address = parsedAddress === -1 ? 0 : parsedAddress;
+      // `lib` is gated by HasAddress, so a [lib:] without an address doesn't
+      // make it onto the frame. This matches the real pipeline, which only ever
+      // puts a lib on a frame whose address it managed to make lib-relative;
+      // pre-symbolicated "func (in libname)" frames get a resource instead.
+      const storedLib =
+        (flags & FrameFlag.HasAddress) !== 0 ? ensureExists(libIndex) : 0;
+      const storedCategory = category ?? 0;
+      const storedNativeSymbol = nativeSymbol ?? 0;
+      const storedLineNumber = lineNumber ?? 0;
 
       // Attempt to find a frame that satisfies the given funcIndex,
       // category, and line number.
@@ -1004,11 +1070,12 @@ function _buildThreadFromTextOnlyStacks(
       for (let i = 0; i < frameTable.length; i++) {
         if (
           funcIndex === frameTable.func[i] &&
-          category === frameTable.category[i] &&
-          lineNumber === frameTable.line[i] &&
+          flags === frameTable.flags[i] &&
+          storedCategory === frameTable.category[i] &&
+          storedLineNumber === frameTable.line[i] &&
           address === frameTable.address[i] &&
-          inlineDepth === frameTable.inlineDepth[i] &&
-          nativeSymbol === frameTable.nativeSymbol[i]
+          storedNativeSymbol === frameTable.nativeSymbol[i] &&
+          storedLib === frameTable.lib[i]
         ) {
           frameIndex = i;
           break;
@@ -1016,19 +1083,22 @@ function _buildThreadFromTextOnlyStacks(
       }
 
       if (frameIndex === undefined) {
+        frameTable.flags.push(flags);
         frameTable.func.push(funcIndex);
+        frameTable.lib.push(storedLib);
         frameTable.address.push(address);
-        frameTable.inlineDepth.push(inlineDepth);
-        frameTable.category.push(category);
+        frameTable.category.push(storedCategory);
         frameTable.subcategory.push(0);
         frameTable.innerWindowID.push(0);
-        frameTable.nativeSymbol.push(nativeSymbol);
-        frameTable.line.push(lineNumber);
-        frameTable.column.push(null);
+        frameTable.nativeSymbol.push(storedNativeSymbol);
+        frameTable.line.push(storedLineNumber);
+        frameTable.column.push(0);
+        frameTable.originalLocation.push(0);
         frameIndex = frameTable.length++;
       }
 
       // Attempt to find a stack that satisfies the given frameIndex and prefix.
+      const stackTable = globalDataCollector.getStackTableBuilder();
       let stackIndex;
       for (let i = 0; i < stackTable.length; i++) {
         if (
@@ -1060,6 +1130,8 @@ function _buildThreadFromTextOnlyStacks(
   if (sampleTimes) {
     samples.time = sampleTimes;
   }
+
+  thread.samples = finishRawSamplesTableBuilder(samples);
 
   return thread;
 }
@@ -1110,6 +1182,7 @@ export function getProfileWithDicts(profile: Profile): ProfileWithDicts {
     computeThreadFromRawThread(
       rawThread,
       shared,
+      profile.meta.categories,
       profile.meta.sampleUnits,
       referenceCPUDeltaPerMs,
       defaultCategory
@@ -1363,41 +1436,34 @@ export function getIPCTrackProfile() {
   return getProfileWithMarkers(arrayOfIPCMarkers);
 }
 
+/**
+ * One screenshot per millisecond, starting at 0.
+ * Each one ends where the next one starts;
+ * the last one is left open unless `destroyTime` is given.
+ */
 export function getScreenshotMarkersForWindowId(
   windowID: string,
-  count: number
-): TestDefinedMarker[] {
-  return Array(count)
-    .fill(undefined)
-    .map((_, i) => [
-      'CompositorScreenshot',
-      i,
-      null,
-      {
-        type: 'CompositorScreenshot',
-        url: 0, // Some arbitrary string.
-        windowID,
-        windowWidth: 300,
-        windowHeight: 150,
-      },
-    ]);
+  count: number,
+  destroyTime: Milliseconds | null = null
+): TestDefinedRawMarker[] {
+  const markers: TestDefinedRawMarker[] = [];
+  for (let i = 0; i < count; i++) {
+    if (i > 0) {
+      markers.push(makeCompositorScreenshotEnd(i, windowID));
+    }
+    markers.push(makeCompositorScreenshot(i, windowID));
+  }
+  if (destroyTime !== null) {
+    markers.push(makeCompositorScreenshotEnd(destroyTime, windowID));
+  }
+  return markers;
 }
 
 export function getScreenshotTrackProfile() {
-  return getProfileWithMarkers([
+  return getProfileWithRawMarkers([
     ...getScreenshotMarkersForWindowId('0', 5), // This window isn't closed, so we should repeat the last screenshot
-    ...getScreenshotMarkersForWindowId('1', 5), // This window is closed after screenshot 6.
+    ...getScreenshotMarkersForWindowId('1', 5, 6), // This window is closed after screenshot 6.
     ...getScreenshotMarkersForWindowId('2', 10), // This window isn't closed and define the profile length
-    [
-      'CompositorScreenshotWindowDestroyed',
-      6,
-      null,
-      {
-        type: 'CompositorScreenshot',
-        windowID: '1',
-        url: undefined,
-      },
-    ],
   ]);
 }
 
@@ -1531,25 +1597,28 @@ export function getProfileWithJsTracerEvents(
 export function getCounterForThread(
   thread: RawThread,
   mainThreadIndex: ThreadIndex,
-  config: { hasCountNumber?: boolean } = {}
+  config: { hasCountNumber?: boolean; name?: string; category?: string } = {}
 ): RawCounter {
   const sampleTimes = computeTimeColumnForRawSamplesTable(thread.samples);
+  const name = config.name ?? 'My Counter';
+  const category = config.category ?? 'My Category';
   const counter: RawCounter = {
-    name: 'My Counter',
-    category: 'My Category',
+    name,
+    category,
     description: 'My Description',
     pid: thread.pid,
     mainThreadIndex,
     samples: {
-      time: sampleTimes.slice(),
+      time: Array.from(sampleTimes),
       // Create some arbitrary (positive integer) values for the number.
       number: config.hasCountNumber
-        ? sampleTimes.map((_, i) => Math.floor(50 * Math.sin(i) + 50))
+        ? Array.from(sampleTimes, (_, i) => Math.floor(50 * Math.sin(i) + 50))
         : undefined,
       // Create some arbitrary values for the count.
-      count: sampleTimes.map((_, i) => Math.sin(i)),
+      count: Array.from(sampleTimes, (_, i) => Math.sin(i)),
       length: thread.samples.length,
     },
+    display: deriveCounterDisplay(category, name),
   };
   return counter;
 }
@@ -1561,7 +1630,7 @@ export function getCounterForThreadWithSamples(
   thread: RawThread,
   mainThreadIndex: ThreadIndex,
   samples: {
-    time?: number[];
+    time?: number[] | Float64Array<ArrayBuffer>;
     number?: number[];
     count?: number[];
     length: number;
@@ -1580,13 +1649,16 @@ export function getCounterForThreadWithSamples(
     length: samples.length,
   };
 
+  const finalName = name ?? 'My Counter';
+  const finalCategory = category ?? 'My Category';
   const counter: RawCounter = {
-    name: name ?? 'My Counter',
-    category: category ?? 'My Category',
+    name: finalName,
+    category: finalCategory,
     description: 'My Description',
     pid: thread.pid,
     mainThreadIndex,
     samples: newSamples,
+    display: deriveCounterDisplay(finalCategory, finalName),
   };
   return counter;
 }
@@ -1664,9 +1736,8 @@ export function getProfileWithJsAllocations() {
              I[lib:libI.so]
   `);
 
-  // Now add a JsAllocationsTable.
-  const jsAllocations = getEmptyJsAllocationsTable();
-  profile.threads[0].jsAllocations = jsAllocations;
+  // Now add a RawJsAllocationsTable.
+  const jsAllocations = getEmptyRawJsAllocationsTable();
 
   // The stack table is built sequentially, so we can assume that the stack indexes
   // match the func indexes.
@@ -1692,6 +1763,9 @@ export function getProfileWithJsAllocations() {
     jsAllocations.stack.push(stack);
     jsAllocations.length++;
   }
+
+  profile.threads[0].jsAllocations =
+    finishRawJsAllocationsTableBuilder(jsAllocations);
 
   return { profile, funcNamesDict, funcNames };
 }
@@ -1744,9 +1818,8 @@ export function getProfileWithUnbalancedNativeAllocations() {
     `
   );
 
-  // Now add a NativeAllocationsTable.
-  const nativeAllocations = getEmptyUnbalancedNativeAllocationsTable();
-  profile.threads[0].nativeAllocations = nativeAllocations;
+  // Now add a RawNativeAllocationsTable.
+  const nativeAllocations = getEmptyRawUnbalancedNativeAllocationsTable();
 
   // The stack table is built sequentially, so we can assume that the stack indexes
   // match the func indexes.
@@ -1773,6 +1846,9 @@ export function getProfileWithUnbalancedNativeAllocations() {
     nativeAllocations.stack.push(stack);
     nativeAllocations.length++;
   }
+
+  profile.threads[0].nativeAllocations =
+    finishRawUnbalancedNativeAllocationsTableBuilder(nativeAllocations);
 
   return { profile, funcNamesDict };
 }
@@ -1812,10 +1888,9 @@ export function getProfileWithBalancedNativeAllocations() {
     `
   );
 
-  // Now add a NativeAllocationsTable.
-  const nativeAllocations = getEmptyBalancedNativeAllocationsTable();
+  // Now add a RawNativeAllocationsTable.
+  const nativeAllocations = getEmptyRawBalancedNativeAllocationsTable();
   const [thread] = profile.threads;
-  thread.nativeAllocations = nativeAllocations;
   const threadId = thread.tid;
   if (typeof threadId !== 'number') {
     throw new Error(
@@ -1860,6 +1935,9 @@ export function getProfileWithBalancedNativeAllocations() {
     nativeAllocations.threadId.push(threadId);
     nativeAllocations.length++;
   }
+
+  thread.nativeAllocations =
+    finishRawBalancedNativeAllocationsTableBuilder(nativeAllocations);
 
   return { profile, funcNamesDict };
 }
@@ -1997,7 +2075,7 @@ export function markTabIdsAsPrivateBrowsing(
 // /!\ This algorithm is good enough for tests, but it's not correct for
 // general cases.
 function getStackIndexForCallNodePath(
-  { stackTable, frameTable }: RawThread,
+  { stackTable, frameTable }: RawProfileSharedData,
   callNodePath: CallNodePath
 ): IndexIntoStackTable {
   let currentFuncInCallNodePath = 0;
@@ -2032,8 +2110,10 @@ function getStackIndexForCallNodePath(
 /**
  * Use this function to add window id information to frames, using call node
  * paths to point to frames using stacks.
+ * This mutates `shared`.
  *
  * @param thread The thread to mutate.
+ * @param shared The shared profile data to mutate.
  * @param listOfOperations A list of pairs { innerWindowID, callNodes }
  *                         indicating which call nodes this innerWindowID will
  *                         be assigned to.
@@ -2041,15 +2121,19 @@ function getStackIndexForCallNodePath(
  *                        get all passed innerWindowIDs
  */
 export function addInnerWindowIdToStacks(
+  shared: RawProfileSharedData,
   thread: RawThread,
   listOfOperations: Array<{ innerWindowID: number; callNodes: CallNodePath[] }>,
   callNodesToDupe?: CallNodePath[]
 ) {
-  const { stackTable, frameTable, samples } = thread;
+  const { stackTable, frameTable } = shared;
+  const samples = getRawSamplesTableBuilderFromExisting(thread.samples);
+  const usedInnerWindowIDsSet = new Set<number>();
 
   for (const { innerWindowID, callNodes } of listOfOperations) {
+    usedInnerWindowIDsSet.add(innerWindowID);
     for (const callNode of callNodes) {
-      const stackIndex = getStackIndexForCallNodePath(thread, callNode);
+      const stackIndex = getStackIndexForCallNodePath(shared, callNode);
       const foundFrameIndex = stackTable.frame[stackIndex];
       frameTable.innerWindowID[foundFrameIndex] = innerWindowID;
     }
@@ -2071,35 +2155,52 @@ export function addInnerWindowIdToStacks(
       IndexIntoStackTable
     >();
 
+    const stackTableBuilder =
+      getRawStackTableBuilderWithExistingContents(stackTable);
+    const frameTableBuilder =
+      getRawFrameTableBuilderWithExistingContents(frameTable);
+
     for (const callNode of callNodesToDupe) {
-      const stackIndex = getStackIndexForCallNodePath(thread, callNode);
+      const stackIndex = getStackIndexForCallNodePath(shared, callNode);
       const foundFrameIndex = stackTable.frame[stackIndex];
       // The found one comes from the first tab.
-      frameTable.innerWindowID[foundFrameIndex] =
+      frameTableBuilder.innerWindowID[foundFrameIndex] =
         listOfOperations[0].innerWindowID;
 
       // Clone this frame
-      const newFrameIndex = frameTable.length++;
-      frameTable.address.push(frameTable.address[foundFrameIndex]);
-      frameTable.inlineDepth.push(frameTable.inlineDepth[foundFrameIndex]);
-      frameTable.category.push(frameTable.category[foundFrameIndex]);
-      frameTable.subcategory.push(frameTable.subcategory[foundFrameIndex]);
-      frameTable.func.push(frameTable.func[foundFrameIndex]);
-      frameTable.nativeSymbol.push(frameTable.nativeSymbol[foundFrameIndex]);
-      frameTable.line.push(frameTable.line[foundFrameIndex]);
-      frameTable.column.push(frameTable.column[foundFrameIndex]);
+      const newFrameIndex = frameTableBuilder.length++;
+      frameTableBuilder.flags.push(frameTable.flags[foundFrameIndex]);
+      frameTableBuilder.address.push(frameTable.address[foundFrameIndex]);
+      frameTableBuilder.category.push(frameTable.category[foundFrameIndex]);
+      frameTableBuilder.subcategory.push(
+        frameTable.subcategory[foundFrameIndex]
+      );
+      frameTableBuilder.func.push(frameTable.func[foundFrameIndex]);
+      frameTableBuilder.lib.push(frameTable.lib[foundFrameIndex]);
+      frameTableBuilder.nativeSymbol.push(
+        frameTable.nativeSymbol[foundFrameIndex]
+      );
+      frameTableBuilder.line.push(frameTable.line[foundFrameIndex]);
+      frameTableBuilder.column.push(frameTable.column[foundFrameIndex]);
+      frameTableBuilder.originalLocation.push(
+        frameTable.originalLocation[foundFrameIndex]
+      );
 
       // And that one comes from the second tab.
-      frameTable.innerWindowID.push(listOfOperations[1].innerWindowID);
+      frameTableBuilder.innerWindowID.push(listOfOperations[1].innerWindowID);
 
       // Clone the stack
-      const newStackIndex = stackTable.length++;
-      stackTable.prefix.push(stackTable.prefix[stackIndex]);
+      const newStackIndex = stackTableBuilder.length++;
+      const offset = stackTable.prefixOffset[stackIndex];
+      stackTableBuilder.prefix.push(offset === 0 ? null : stackIndex - offset);
       // Using the cloned frame index.
-      stackTable.frame.push(newFrameIndex);
+      stackTableBuilder.frame.push(newFrameIndex);
 
       mapStackIndexToDupe.set(stackIndex, newStackIndex);
     }
+
+    shared.stackTable = finishRawStackTableBuilder(stackTableBuilder);
+    shared.frameTable = finishRawFrameTableBuilder(frameTableBuilder);
 
     const sampleTimes = ensureExists(samples.time);
     for (let sampleIndex = samples.length; sampleIndex >= 0; sampleIndex--) {
@@ -2120,6 +2221,9 @@ export function addInnerWindowIdToStacks(
       if (samples.responsiveness) {
         samples.responsiveness.push(samples.responsiveness[sampleIndex]);
       }
+      if (samples.argumentValues) {
+        samples.argumentValues.push(samples.argumentValues[sampleIndex]);
+      }
       if (samples.threadCPUDelta) {
         samples.threadCPUDelta.push(samples.threadCPUDelta[sampleIndex]);
       }
@@ -2128,6 +2232,12 @@ export function addInnerWindowIdToStacks(
       }
       samples.length++;
     }
+  }
+
+  thread.samples = finishRawSamplesTableBuilder(samples);
+
+  if (usedInnerWindowIDsSet.size !== 0) {
+    thread.usedInnerWindowIDs = Array.from(usedInnerWindowIDsSet);
   }
 }
 

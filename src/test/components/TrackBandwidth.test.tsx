@@ -13,7 +13,7 @@ import {
 } from 'firefox-profiler/test/fixtures/testing-library';
 
 import { updatePreviewSelection } from 'firefox-profiler/actions/profile-view';
-import { TrackBandwidth } from '../../components/timeline/TrackBandwidth';
+import { TrackCounter } from '../../components/timeline/TrackCounter';
 import { ensureExists } from '../../utils/types';
 
 import {
@@ -66,30 +66,37 @@ describe('TrackBandwidth', function () {
     for (let i = 7; i < thread.samples.length - 1; ++i) {
       sampleTimes[i] = 7 + i / 100;
     }
-    profile.counters = [
-      getCounterForThreadWithSamples(
-        thread,
-        threadIndex,
-        {
-          time: sampleTimes.slice(),
-          // Bandwidth usage numbers. They are bytes.
-          count: [
-            10000, 40000, 50000, 100000, 2000000, 5000000, 30000, 1000000,
-            20000, 1, 12000, 100000,
-          ],
-          length: SAMPLE_COUNT,
-        },
-        'SystemBandwidth',
-        'bandwidth'
-      ),
-    ];
+    const counter = getCounterForThreadWithSamples(
+      thread,
+      threadIndex,
+      {
+        time: sampleTimes.slice(),
+        // Bandwidth usage numbers. They are bytes.
+        count: [
+          10000, 40000, 50000, 100000, 2000000, 5000000, 30000, 1000000, 20000,
+          1, 12000, 100000,
+        ],
+        length: SAMPLE_COUNT,
+      },
+      'SystemBandwidth',
+      'Bandwidth'
+    );
+    counter.display = {
+      ...counter.display,
+      graphType: 'line-rate',
+      unit: 'bytes',
+      color: 'blue',
+      sortWeight: 10,
+      label: 'Bandwidth',
+    };
+    profile.counters = [counter];
     const store = storeWithProfile(profile);
     const { getState, dispatch } = store;
     const flushRafCalls = mockRaf();
 
     const renderResult = render(
       <Provider store={store}>
-        <TrackBandwidth counterIndex={0} />
+        <TrackCounter counterIndex={0} />
       </Provider>
     );
     const { container } = renderResult;
@@ -98,13 +105,13 @@ describe('TrackBandwidth', function () {
     flushRafCalls();
 
     const canvas = ensureExists(
-      container.querySelector('.timelineTrackBandwidthCanvas'),
-      `Couldn't find the bandwidth canvas, with selector .timelineTrackBandwidthCanvas`
+      container.querySelector('.timelineTrackCounterCanvas'),
+      `Couldn't find the bandwidth canvas, with selector .timelineTrackCounterCanvas`
     );
     const getTooltipContents = () =>
-      document.querySelector('.timelineTrackBandwidthTooltip');
+      document.querySelector('.timelineTrackCounterTooltip');
     const getBandwidthDot = () =>
-      container.querySelector('.timelineTrackBandwidthGraphDot');
+      container.querySelector('.timelineTrackCounterGraphDot');
     const moveMouseAtCounter = (index: number, pos: number) =>
       fireEvent(
         canvas,
@@ -164,7 +171,7 @@ describe('TrackBandwidth', function () {
       screen.getByText('Transfer speed for this sample:')
     ).toBeInTheDocument();
     expect(screen.getByText(/speed/).nextSibling).toHaveTextContent(
-      '4.66GB\u2069 per second'
+      '5.00GB\u2069 per second'
     );
 
     expect(
@@ -176,14 +183,14 @@ describe('TrackBandwidth', function () {
       screen.getByText('Data transferred up to this time:')
     ).toBeInTheDocument();
     expect(screen.getByText(/transferred up to/).nextSibling).toHaveTextContent(
-      /6.86MB\u2069 \(\u2068\d+(\.\d+)?\u2069 g CO₂e\)/
+      /7.19MB\u2069 \(\u2068\d+(\.\d+)?\u2069 g CO₂e\)/
     );
 
     expect(
       screen.getByText('Data transferred in the visible range:')
     ).toBeInTheDocument();
     expect(screen.getByText(/visible range/).nextSibling).toHaveTextContent(
-      /7.97MB\u2069 \(\u2068\d+(\.\d+)?\u2069 g CO₂e\)/
+      /8.35MB\u2069 \(\u2068\d+(\.\d+)?\u2069 g CO₂e\)/
     );
   });
 
@@ -224,13 +231,13 @@ describe('TrackBandwidth', function () {
     moveMouseAtCounter(3, 0);
     // Note: Fluent adds isolation characters \u2068 and \u2069 around variables.
     expect(screen.getByText(/speed/).nextSibling).toHaveTextContent(
-      '95.4MB\u2069 per second'
+      '100MB\u2069 per second'
     );
     expect(screen.getByText(/visible range:/).nextSibling).toHaveTextContent(
-      /7.97MB\u2069 \(\u2068\d+(\.\d+)?\u2069 g CO₂e\)/
+      /8.35MB\u2069 \(\u2068\d+(\.\d+)?\u2069 g CO₂e\)/
     );
     expect(
       screen.getByText(/current selection:/).nextSibling
-    ).toHaveTextContent(/4.77MB\u2069 \(\u2068\d+(\.\d+)?\u2069 g CO₂e\)/);
+    ).toHaveTextContent(/5.00MB\u2069 \(\u2068\d+(\.\d+)?\u2069 g CO₂e\)/);
   });
 });

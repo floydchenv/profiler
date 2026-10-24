@@ -28,6 +28,7 @@ import { updateBrowserConnectionStatus } from 'firefox-profiler/actions/app';
 import { simulateWebChannel } from '../fixtures/mocks/web-channel';
 import { retrieveProfileFromBrowser } from '../../actions/receive-profile';
 import type { GeckoProfile } from 'firefox-profiler/types';
+import { FuncFlag } from 'firefox-profiler/types';
 
 describe('calltree/CallNodeContextMenu', function () {
   // Provide a store with a useful profile to assert context menu operations off of.
@@ -62,7 +63,6 @@ describe('calltree/CallNodeContextMenu', function () {
       A.js
       B.js
     `);
-    const [thread] = profile.threads;
     const fileNameIndex = stringTable.indexForString(
       'https://example.com/script.js'
     );
@@ -70,15 +70,21 @@ describe('calltree/CallNodeContextMenu', function () {
     // Create a source entry
     const sourceIndex = addSourceToTable(profile.shared.sources, fileNameIndex);
 
+    const { funcTable } = profile.shared;
+
+    const jsFuncFlags =
+      FuncFlag.HasSource | FuncFlag.HasLine | FuncFlag.HasColumn;
     const funcIndexA = funcNames.indexOf('A.js');
-    thread.funcTable.source[funcIndexA] = sourceIndex;
-    thread.funcTable.lineNumber[funcIndexA] = 1;
-    thread.funcTable.columnNumber[funcIndexA] = 111;
+    funcTable.source[funcIndexA] = sourceIndex;
+    funcTable.lineNumber[funcIndexA] = 1;
+    funcTable.columnNumber[funcIndexA] = 111;
+    funcTable.flags[funcIndexA] |= jsFuncFlags;
 
     const funcIndexB = funcNames.indexOf('B.js');
-    thread.funcTable.source[funcIndexB] = sourceIndex;
-    thread.funcTable.lineNumber[funcIndexB] = 2;
-    thread.funcTable.columnNumber[funcIndexB] = 222;
+    funcTable.source[funcIndexB] = sourceIndex;
+    funcTable.lineNumber[funcIndexB] = 2;
+    funcTable.columnNumber[funcIndexB] = 222;
+    funcTable.flags[funcIndexB] |= jsFuncFlags;
 
     const store = storeWithProfile(profile);
     store.dispatch(changeRightClickedCallNode(0, [funcIndexA, funcIndexB]));

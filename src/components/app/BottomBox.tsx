@@ -3,35 +3,41 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
 import React from 'react';
-import SplitterLayout from 'react-splitter-layout';
 import classNames from 'classnames';
 
 import { SourceView } from '../shared/SourceView';
 import { AssemblyView } from '../shared/AssemblyView';
+import { FullscreenToggleButton } from './FullscreenToggleButton';
+import { ResizableWithSplitter } from '../shared/ResizableWithSplitter';
 import { AssemblyViewToggleButton } from './AssemblyViewToggleButton';
+import { AssemblyViewNativeSymbolNavigator } from './AssemblyViewNativeSymbolNavigator';
 import { IonGraphView } from '../shared/IonGraphView';
 import { CodeLoadingOverlay } from './CodeLoadingOverlay';
 import { CodeErrorOverlay } from './CodeErrorOverlay';
 import {
   getSourceViewScrollGeneration,
-  getSourceViewLineNumber,
+  getSourceViewScrollToLineNumber,
+  getSourceViewHighlightedLine,
   getAssemblyViewIsOpen,
   getAssemblyViewNativeSymbol,
   getAssemblyViewScrollGeneration,
+  getAssemblyViewScrollToInstructionAddress,
+  getAssemblyViewHighlightedInstruction,
+  getIsBottomBoxFullscreen,
 } from 'firefox-profiler/selectors/url-state';
 import {
-  selectedThreadSelectors,
-  selectedNodeSelectors,
-} from 'firefox-profiler/selectors/per-thread';
-import { closeBottomBox } from 'firefox-profiler/actions/profile-view';
+  closeBottomBox,
+  toggleBottomBoxFullscreen,
+} from 'firefox-profiler/actions/profile-view';
+import { selectedThreadSelectors } from 'firefox-profiler/selectors/per-thread';
 import { parseFileNameFromSymbolication } from 'firefox-profiler/utils/special-paths';
 import {
   getSourceViewCode,
   getAssemblyViewCode,
 } from 'firefox-profiler/selectors/code';
 import {
-  getPreviewSelectionIsBeingModified,
   getSourceViewFile,
+  getSourceViewStartLine,
 } from 'firefox-profiler/selectors/profile';
 import explicitConnect from 'firefox-profiler/utils/connect';
 
@@ -52,23 +58,26 @@ import { Localized } from '@fluent/react';
 import './BottomBox.css';
 
 type StateProps = {
+  readonly isFullscreen: boolean;
   readonly sourceViewFile: string | null;
   readonly sourceViewCode: SourceCodeStatus | void;
   readonly sourceViewScrollGeneration: number;
-  readonly sourceViewLineNumber?: number;
+  readonly sourceViewScrollToLineNumber?: number;
+  readonly sourceViewHighlightedLine: number | null;
+  readonly sourceViewStartLine: number;
   readonly globalLineTimings: LineTimings;
-  readonly selectedCallNodeLineTimings: LineTimings;
   readonly assemblyViewIsOpen: boolean;
   readonly assemblyViewNativeSymbol: NativeSymbolInfo | null;
   readonly assemblyViewCode: AssemblyCodeStatus | void;
   readonly assemblyViewScrollGeneration: number;
+  readonly assemblyViewScrollToInstructionAddress?: number;
+  readonly assemblyViewHighlightedInstruction: number | null;
   readonly globalAddressTimings: AddressTimings;
-  readonly selectedCallNodeAddressTimings: AddressTimings;
-  readonly disableOverscan: boolean;
 };
 
 type DispatchProps = {
   readonly closeBottomBox: typeof closeBottomBox;
+  readonly toggleBottomBoxFullscreen: typeof toggleBottomBoxFullscreen;
 };
 
 type Props = ConnectedProps<{}, StateProps, DispatchProps>;
@@ -151,25 +160,45 @@ class BottomBoxImpl extends React.PureComponent<Props> {
   _sourceView = React.createRef<SourceView>();
   _assemblyView = React.createRef<AssemblyView>();
 
+  override componentDidMount() {
+    document.addEventListener('keydown', this._onKeyDown);
+  }
+
+  override componentWillUnmount() {
+    document.removeEventListener('keydown', this._onKeyDown);
+  }
+
+  _onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape' && this.props.isFullscreen) {
+      this.props.toggleBottomBoxFullscreen();
+    }
+  };
+
   _onClickCloseButton = () => {
     this.props.closeBottomBox();
+    // Close the fullscreen if we're closing the bottom box
+    if (this.props.isFullscreen) {
+      this.props.toggleBottomBoxFullscreen();
+    }
   };
 
   override render() {
     const {
+      isFullscreen,
       sourceViewFile,
       sourceViewCode,
       globalLineTimings,
-      disableOverscan,
       sourceViewScrollGeneration,
-      sourceViewLineNumber,
-      selectedCallNodeLineTimings,
+      sourceViewScrollToLineNumber,
+      sourceViewHighlightedLine,
+      sourceViewStartLine,
       assemblyViewIsOpen,
       assemblyViewScrollGeneration,
+      assemblyViewScrollToInstructionAddress,
+      assemblyViewHighlightedInstruction,
       assemblyViewNativeSymbol,
       assemblyViewCode,
       globalAddressTimings,
-      selectedCallNodeAddressTimings,
     } = this.props;
     const sourceCode =
       sourceViewCode && sourceViewCode.type === 'AVAILABLE'
@@ -195,7 +224,9 @@ class BottomBoxImpl extends React.PureComponent<Props> {
     // These trailing header buttons go into the bottom-box-bar of the last pane.
     const trailingHeaderButtons = (
       <div className="bottom-box-header-trailing-buttons">
+        {assemblyViewIsOpen ? <AssemblyViewNativeSymbolNavigator /> : null}
         <AssemblyViewToggleButton />
+        <FullscreenToggleButton />
         <Localized id="SourceView--close-button" attrs={{ title: true }}>
           <button
             className={classNames(
@@ -212,46 +243,53 @@ class BottomBoxImpl extends React.PureComponent<Props> {
     );
 
     return (
-      <div className="bottom-box">
-        <SplitterLayout customClassName="bottom-box" percentage>
-          <div className="bottom-box-pane">
-            <div className="bottom-box-bar">
-              <h3 className="bottom-box-title">{path ?? '(no source file)'}</h3>
-              {assemblyViewIsOpen ? null : trailingHeaderButtons}
-            </div>
-            <div className="bottom-sourceview-wrapper">
-              {displayIonGraph ? (
-                <IonGraphView
-                  timings={globalLineTimings}
-                  hotSpotTimings={selectedCallNodeLineTimings}
-                  sourceCode={sourceCode}
-                />
-              ) : null}
-              {displaySourceView ? (
-                <SourceView
-                  disableOverscan={disableOverscan}
-                  timings={globalLineTimings}
-                  sourceCode={sourceCode}
-                  filePath={path}
-                  scrollToHotSpotGeneration={sourceViewScrollGeneration}
-                  scrollToLineNumber={sourceViewLineNumber}
-                  hotSpotTimings={selectedCallNodeLineTimings}
-                  highlightedLine={sourceViewLineNumber}
-                  ref={this._sourceView}
-                />
-              ) : null}
-              {sourceViewCode !== undefined &&
-              sourceViewCode.type === 'LOADING' ? (
-                <CodeLoadingOverlay source={sourceViewCode.source} />
-              ) : null}
-              {sourceViewCode !== undefined &&
-              sourceViewCode.type === 'ERROR' ? (
-                <SourceCodeErrorOverlay errors={sourceViewCode.errors} />
-              ) : null}
-            </div>
+      <div
+        className={classNames(
+          'bottom-box',
+          isFullscreen ? 'bottom-box-fullscreen' : null
+        )}
+      >
+        <div className="bottom-box-pane">
+          <div className="bottom-box-bar">
+            <h3 className="bottom-box-title">{path ?? '(no source file)'}</h3>
+            {assemblyViewIsOpen ? null : trailingHeaderButtons}
           </div>
+          <div className="bottom-sourceview-wrapper">
+            {displayIonGraph ? (
+              <IonGraphView
+                timings={globalLineTimings}
+                sourceCode={sourceCode}
+              />
+            ) : null}
+            {displaySourceView ? (
+              <SourceView
+                timings={globalLineTimings}
+                sourceCode={sourceCode}
+                filePath={path}
+                scrollGeneration={sourceViewScrollGeneration}
+                scrollToLineNumber={sourceViewScrollToLineNumber}
+                highlightedLine={sourceViewHighlightedLine}
+                startLine={sourceViewStartLine}
+                ref={this._sourceView}
+              />
+            ) : null}
+            {sourceViewCode !== undefined &&
+            sourceViewCode.type === 'LOADING' ? (
+              <CodeLoadingOverlay source={sourceViewCode.source} />
+            ) : null}
+            {sourceViewCode !== undefined && sourceViewCode.type === 'ERROR' ? (
+              <SourceCodeErrorOverlay errors={sourceViewCode.errors} />
+            ) : null}
+          </div>
+        </div>
 
-          {assemblyViewIsOpen ? (
+        {assemblyViewIsOpen ? (
+          <ResizableWithSplitter
+            splitterPosition="start"
+            controlledProperty="width"
+            percent={true}
+            initialSize="50%"
+          >
             <div className="bottom-box-pane">
               <div className="bottom-box-bar">
                 <h3 className="bottom-box-title">
@@ -264,12 +302,14 @@ class BottomBoxImpl extends React.PureComponent<Props> {
               <div className="bottom-assemblyview-wrapper">
                 {assemblyViewNativeSymbol !== null ? (
                   <AssemblyView
-                    disableOverscan={disableOverscan}
                     timings={globalAddressTimings}
                     assemblyCode={assemblyCode}
                     nativeSymbol={assemblyViewNativeSymbol}
-                    scrollToHotSpotGeneration={assemblyViewScrollGeneration}
-                    hotSpotTimings={selectedCallNodeAddressTimings}
+                    scrollGeneration={assemblyViewScrollGeneration}
+                    scrollToInstructionAddress={
+                      assemblyViewScrollToInstructionAddress
+                    }
+                    highlightedInstruction={assemblyViewHighlightedInstruction}
                     ref={this._assemblyView}
                   />
                 ) : null}
@@ -285,8 +325,8 @@ class BottomBoxImpl extends React.PureComponent<Props> {
                 ) : null}
               </div>
             </div>
-          ) : null}
-        </SplitterLayout>
+          </ResizableWithSplitter>
+        ) : null}
       </div>
     );
   }
@@ -299,25 +339,28 @@ function convertErrors(errors: ApiQueryError[]): SourceCodeLoadingError[] {
 
 export const BottomBox = explicitConnect<{}, StateProps, DispatchProps>({
   mapStateToProps: (state) => ({
+    isFullscreen: getIsBottomBoxFullscreen(state),
     sourceViewFile: getSourceViewFile(state),
     sourceViewCode: getSourceViewCode(state),
     globalLineTimings: selectedThreadSelectors.getSourceViewLineTimings(state),
-    selectedCallNodeLineTimings:
-      selectedNodeSelectors.getSourceViewLineTimings(state),
     sourceViewScrollGeneration: getSourceViewScrollGeneration(state),
-    sourceViewLineNumber: getSourceViewLineNumber(state),
+    sourceViewScrollToLineNumber: getSourceViewScrollToLineNumber(state),
+    sourceViewHighlightedLine: getSourceViewHighlightedLine(state),
+    sourceViewStartLine: getSourceViewStartLine(state),
     assemblyViewNativeSymbol: getAssemblyViewNativeSymbol(state),
     assemblyViewCode: getAssemblyViewCode(state),
     globalAddressTimings:
       selectedThreadSelectors.getAssemblyViewAddressTimings(state),
-    selectedCallNodeAddressTimings:
-      selectedNodeSelectors.getAssemblyViewAddressTimings(state),
     assemblyViewScrollGeneration: getAssemblyViewScrollGeneration(state),
+    assemblyViewScrollToInstructionAddress:
+      getAssemblyViewScrollToInstructionAddress(state),
+    assemblyViewHighlightedInstruction:
+      getAssemblyViewHighlightedInstruction(state),
     assemblyViewIsOpen: getAssemblyViewIsOpen(state),
-    disableOverscan: getPreviewSelectionIsBeingModified(state),
   }),
   mapDispatchToProps: {
     closeBottomBox,
+    toggleBottomBoxFullscreen,
   },
   component: BottomBoxImpl,
 });

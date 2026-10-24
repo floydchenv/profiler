@@ -15,6 +15,7 @@ import {
   getLocalTracksByPid,
   getThreads,
   getLastNonShiftClick,
+  getReservedFunctionsForResources,
 } from 'firefox-profiler/selectors/profile';
 import {
   getThreadSelectors,
@@ -46,6 +47,7 @@ import {
   getTrackReferenceFromThreadIndex,
 } from 'firefox-profiler/profile-logic/tracks';
 
+import { FuncFlag } from 'firefox-profiler/types';
 import type {
   PreviewSelection,
   ImplementationFilter,
@@ -81,6 +83,7 @@ import {
 import { changeStoredProfileNameInDb } from 'firefox-profiler/app-logic/uploaded-profiles-db';
 import type { TabSlug } from '../app-logic/tabs-handling';
 import type { CallNodeInfo } from '../profile-logic/call-node-info';
+import type { SingleColumnSortState } from '../components/shared/TreeView';
 import { intersectSets } from 'firefox-profiler/utils/set';
 
 /**
@@ -155,9 +158,7 @@ export function selectSelfCallNode(
   return (dispatch, getState) => {
     const threadSelectors = getThreadSelectorsFromThreadsKey(threadsKey);
     const sampleCallNodes =
-      threadSelectors.getSampleIndexToNonInvertedCallNodeIndexForFilteredThread(
-        getState()
-      );
+      threadSelectors.getSampleCallNodesForFilteredThread(getState());
 
     if (
       sampleIndex === null ||
@@ -346,10 +347,7 @@ function getInformationFromTrackReference(
             relatedThreadIndex: localTrack.threadIndex,
             relatedTab: null,
           };
-        case 'memory':
-        case 'bandwidth':
-        case 'process-cpu':
-        case 'power': {
+        case 'counter': {
           const counterSelectors = getCounterSelectors(localTrack.counterIndex);
           const counter = counterSelectors.getCounter(state);
           return {
@@ -1271,9 +1269,10 @@ function _findOtherVisibleThread(
     const localTracks = getLocalTracks(getState(), globalTrack.pid);
     const localTrackOrder = getLocalTrackOrder(getState(), globalTrack.pid);
     const hiddenLocalTracks = getHiddenLocalTracks(getState(), globalTrack.pid);
-    const localTrackIndexesToIgnore = localTrackIndexesToIgnoreByPid
-      ? (localTrackIndexesToIgnoreByPid.get(globalTrack.pid) ?? new Set())
-      : new Set();
+    const localTrackIndexesToIgnore: Set<TrackIndex> =
+      localTrackIndexesToIgnoreByPid
+        ? (localTrackIndexesToIgnoreByPid.get(globalTrack.pid) ?? new Set())
+        : new Set();
 
     for (const trackIndex of localTrackOrder) {
       const track = localTracks[trackIndex];
@@ -1616,6 +1615,15 @@ export function changeMarkersSearchString(searchString: string): Action {
   };
 }
 
+export function changeMarkerTableSort(
+  sort: SingleColumnSortState[] | null
+): Action {
+  return {
+    type: 'CHANGE_MARKER_TABLE_SORT',
+    sort,
+  };
+}
+
 export function changeNetworkSearchString(searchString: string): Action {
   return {
     type: 'CHANGE_NETWORK_SEARCH_STRING',
@@ -1687,6 +1695,7 @@ export function changeInvertCallstack(
     dispatch({
       type: 'CHANGE_INVERT_CALLSTACK',
       invertCallstack,
+      selectedTab: getSelectedTab(getState()),
       selectedThreadIndexes: getSelectedThreadIndexes(getState()),
       newSelectedCallNodePath,
     });
@@ -1705,6 +1714,17 @@ export function changeShowUserTimings(
     dispatch({
       type: 'CHANGE_SHOW_USER_TIMINGS',
       showUserTimings,
+    });
+  };
+}
+
+export function changeIncludeIdleSamples(
+  includeIdleSamples: boolean
+): ThunkAction<void> {
+  return (dispatch) => {
+    dispatch({
+      type: 'CHANGE_INCLUDE_IDLE_SAMPLES',
+      includeIdleSamples,
     });
   };
 }
@@ -1781,15 +1801,17 @@ export function commitRange(start: number, end: number): Action {
 }
 
 export function popCommittedRanges(
-  firstPoppedFilterIndex: number
+  firstPoppedFilterIndex: number,
+  shouldSetPreviewSelection: boolean = true
 ): ThunkAction<void> {
   return (dispatch, getState) => {
     dispatch({
       type: 'POP_COMMITTED_RANGES',
       firstPoppedFilterIndex,
-      // If the clicked range is not the last one, make the current committed
-      // range the new preview selection, otherwise clear the selection.
+      // If shouldSetPreviewSelection is true and the clicked range is not the last one,
+      // make the current committed range the new preview selection, otherwise clear the selection.
       committedRange:
+        shouldSetPreviewSelection &&
         getAllCommittedRanges(getState()).length !== firstPoppedFilterIndex &&
         getCommittedRange(getState()),
     });
@@ -1828,9 +1850,8 @@ export function addCollapseResourceTransformToStack(
   implementation: ImplementationFilter
 ): ThunkAction<void> {
   return (dispatch, getState) => {
-    const threadSelectors = getThreadSelectorsFromThreadsKey(threadsKey);
     const reservedFunctionsForResources =
-      threadSelectors.getReservedFunctionsForResources(getState());
+      getReservedFunctionsForResources(getState());
     const collapsedFuncIndex = ensureExists(
       ensureExists(reservedFunctionsForResources).get(resourceIndex)
     );
@@ -1851,11 +1872,20 @@ export function popTransformsFromStack(
 ): ThunkAction<void> {
   return (dispatch, getState) => {
     const threadsKey = getSelectedThreadsKey(getState());
-    dispatch({
-      type: 'POP_TRANSFORMS_FROM_STACK',
-      threadsKey,
-      firstPoppedFilterIndex,
-    });
+    dispatch(
+      popTransformsFromStackForThreads(threadsKey, firstPoppedFilterIndex)
+    );
+  };
+}
+
+export function popTransformsFromStackForThreads(
+  threadsKey: ThreadsKey,
+  firstPoppedFilterIndex: number
+): Action {
+  return {
+    type: 'POP_TRANSFORMS_FROM_STACK',
+    threadsKey,
+    firstPoppedFilterIndex,
   };
 }
 
@@ -1917,28 +1947,54 @@ export function changeTableViewOptions(
 
 export function updateBottomBoxContentsAndMaybeOpen(
   currentTab: TabSlug,
-  { libIndex, sourceIndex, nativeSymbols, lineNumber }: BottomBoxInfo
+  bottomBoxInfo: BottomBoxInfo
 ): Action {
-  // TODO: If the set has more than one element, pick the native symbol with
-  // the highest total sample count
-  const nativeSymbol = nativeSymbols.length !== 0 ? nativeSymbols[0] : null;
+  const {
+    sourceIndex,
+    nativeSymbols,
+    initialNativeSymbol,
+    scrollToLineNumber,
+    scrollToInstructionAddress,
+    highlightedLineNumber,
+    highlightedInstructionAddress,
+  } = bottomBoxInfo;
+
+  const haveSource = sourceIndex !== null;
+  const haveAssembly = nativeSymbols.length !== 0;
+
+  const shouldOpenBottomBox = haveSource || haveAssembly;
+
+  // By default, only open the source view and keep the assembly
+  // view closed - unless the only thing we have is assembly.
+  const shouldOpenAssemblyView = !haveSource && haveAssembly;
 
   return {
     type: 'UPDATE_BOTTOM_BOX',
-    libIndex,
     sourceIndex,
-    nativeSymbol,
-    allNativeSymbolsForInitiatingCallNode: nativeSymbols,
+    nativeSymbols,
+    currentNativeSymbol: initialNativeSymbol,
     currentTab,
-    shouldOpenBottomBox: sourceIndex !== null || nativeSymbol !== null,
-    shouldOpenAssemblyView: sourceIndex === null && nativeSymbol !== null,
-    lineNumber,
+    shouldOpenBottomBox,
+    shouldOpenAssemblyView,
+    scrollToLineNumber,
+    scrollToInstructionAddress,
+    highlightedLineNumber,
+    highlightedInstructionAddress,
   };
 }
 
 export function openAssemblyView(): Action {
   return {
     type: 'OPEN_ASSEMBLY_VIEW',
+  };
+}
+
+export function changeAssemblyViewNativeSymbolEntryIndex(
+  entryIndex: number
+): Action {
+  return {
+    type: 'CHANGE_ASSEMBLY_VIEW_NATIVE_SYMBOL_ENTRY_INDEX',
+    entryIndex,
   };
 }
 
@@ -1958,9 +2014,18 @@ export function closeBottomBox(): ThunkAction<void> {
   };
 }
 
+export function toggleBottomBoxFullscreen(): ThunkAction<void> {
+  return (dispatch) => {
+    dispatch({
+      type: 'TOGGLE_BOTTOM_BOX_FULLSCREEN',
+    });
+  };
+}
+
 export function handleCallNodeTransformShortcut(
   event: React.KeyboardEvent<HTMLElement>,
   threadsKey: ThreadsKey,
+  callNodeInfo: CallNodeInfo,
   callNodeIndex: IndexIntoCallNodeTable
 ): ThunkAction<void> {
   return (dispatch, getState) => {
@@ -1969,7 +2034,6 @@ export function handleCallNodeTransformShortcut(
     }
     const threadSelectors = getThreadSelectorsFromThreadsKey(threadsKey);
     const unfilteredThread = threadSelectors.getThread(getState());
-    const callNodeInfo = threadSelectors.getCallNodeInfo(getState());
     const implementation = getImplementationFilter(getState());
     const inverted = getInvertCallstack(getState());
     const callNodePath = callNodeInfo.getCallNodePathFromIndex(callNodeIndex);
@@ -1994,6 +2058,15 @@ export function handleCallNodeTransformShortcut(
           addTransformToStack(threadsKey, {
             type: 'focus-function',
             funcIndex,
+          })
+        );
+        break;
+      case 'S':
+        dispatch(
+          addTransformToStack(threadsKey, {
+            type: 'focus-self',
+            funcIndex,
+            implementation,
           })
         );
         break;
@@ -2024,11 +2097,14 @@ export function handleCallNodeTransformShortcut(
         break;
       case 'C': {
         const { funcTable } = unfilteredThread;
-        const resourceIndex = funcTable.resource[funcIndex];
+        if ((funcTable.flags[funcIndex] & FuncFlag.HasResource) === 0) {
+          // This func has no resource, so there is nothing to collapse.
+          return;
+        }
         dispatch(
           addCollapseResourceTransformToStack(
             threadsKey,
-            resourceIndex,
+            funcTable.resource[funcIndex],
             implementation
           )
         );

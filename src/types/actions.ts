@@ -5,14 +5,18 @@
 import type JSZip from 'jszip';
 import type {
   Profile,
+  RawProfileSharedData,
   RawThread,
   ThreadIndex,
   Pid,
   TabID,
   IndexIntoCategoryList,
-  IndexIntoLibs,
   PageList,
   IndexIntoSourceTable,
+  RawFuncTable,
+  RawFrameTable,
+  SourceLocationTable,
+  SourceTable,
 } from './profile';
 import type {
   Thread,
@@ -23,12 +27,14 @@ import type {
   MarkerIndex,
   ThreadsKey,
   NativeSymbolInfo,
+  ProfileIndexTranslationMaps,
 } from './profile-derived';
 import type { FuncToFuncsMap } from '../profile-logic/symbolication';
 import type { TemporaryError } from '../utils/errors';
 import type { Transform, TransformStacksPerThread } from './transforms';
 import type { IndexIntoZipFileTable } from '../profile-logic/zip-files';
 import type { CallNodeInfo } from '../profile-logic/call-node-info';
+import type { SingleColumnSortState } from '../components/shared/TreeView';
 import type { TabSlug } from '../app-logic/tabs-handling';
 import type {
   UrlState,
@@ -39,6 +45,7 @@ import type {
   ApiQueryError,
   TableViewOptions,
   DecodedInstruction,
+  ProfileEncodingResult,
 } from './state';
 import type { CssPixels, StartEndRange, Milliseconds } from './units';
 import type { BrowserConnectionStatus } from '../app-logic/browser-connection';
@@ -83,7 +90,10 @@ export type DataSource =
   // this browser, and allows deleting / unpublishing those profiles.
   | 'uploaded-recordings';
 
-export type TimelineType = 'stack' | 'category' | 'cpu-category';
+// Controls which graph is shown in thread tracks.
+// 'cpu-category': Shows the category activity graph.
+// 'stack':        Shows the stack graph, for profiles without category information.
+export type TimelineType = 'stack' | 'cpu-category';
 export type PreviewSelection = {
   readonly isModifying: boolean;
   readonly selectionStart: number;
@@ -149,7 +159,10 @@ export type CheckedSharingOptions = {
   includeExtension: boolean;
   includePreferenceValues: boolean;
   includePrivateBrowsingData: boolean;
+  includeArgumentValues: boolean;
 };
+
+export type SharingMode = 'download' | 'upload';
 
 // This type is used when selecting tracks in the timeline. Ctrl and Meta are
 // stored in the same property to accommodate all OSes.
@@ -316,9 +329,6 @@ type ProfileAction =
       readonly type: 'SET_CONTEXT_MENU_VISIBILITY';
       readonly isVisible: boolean;
     }
-  | {
-      readonly type: 'INCREMENT_PANEL_LAYOUT_GENERATION';
-    }
   | { readonly type: 'HAS_ZOOMED_VIA_MOUSEWHEEL' }
   | { readonly type: 'DISMISS_NEWLY_PUBLISHED' }
   | {
@@ -336,17 +346,23 @@ type ProfileAction =
     }
   | {
       readonly type: 'UPDATE_BOTTOM_BOX';
-      readonly libIndex: IndexIntoLibs | null;
       readonly sourceIndex: IndexIntoSourceTable | null;
-      readonly nativeSymbol: NativeSymbolInfo | null;
-      readonly allNativeSymbolsForInitiatingCallNode: NativeSymbolInfo[];
+      readonly nativeSymbols: NativeSymbolInfo[];
+      readonly currentNativeSymbol: number | null;
       readonly currentTab: TabSlug;
       readonly shouldOpenBottomBox: boolean;
       readonly shouldOpenAssemblyView: boolean;
-      readonly lineNumber?: number;
+      readonly scrollToLineNumber?: number;
+      readonly scrollToInstructionAddress?: number;
+      readonly highlightedLineNumber: number | null;
+      readonly highlightedInstructionAddress: number | null;
     }
   | {
       readonly type: 'OPEN_ASSEMBLY_VIEW';
+    }
+  | {
+      readonly type: 'CHANGE_ASSEMBLY_VIEW_NATIVE_SYMBOL_ENTRY_INDEX';
+      readonly entryIndex: number;
     }
   | {
       readonly type: 'CLOSE_ASSEMBLY_VIEW';
@@ -354,13 +370,17 @@ type ProfileAction =
   | {
       readonly type: 'CLOSE_BOTTOM_BOX_FOR_TAB';
       readonly tab: TabSlug;
+    }
+  | {
+      readonly type: 'TOGGLE_BOTTOM_BOX_FULLSCREEN';
     };
 
 type ReceiveProfileAction =
   | {
       readonly type: 'BULK_SYMBOLICATION';
       readonly symbolicatedThreads: RawThread[];
-      readonly oldFuncToNewFuncsMaps: Map<ThreadIndex, FuncToFuncsMap>;
+      readonly symbolicatedShared: RawProfileSharedData;
+      readonly oldFuncToNewFuncsMap: FuncToFuncsMap;
     }
   | {
       readonly type: 'DONE_SYMBOLICATING';
@@ -429,6 +449,18 @@ type ReceiveProfileAction =
   | {
       readonly type: 'UPDATE_PAGES';
       readonly newPages: PageList;
+    }
+  | { readonly type: 'START_SOURCE_MAP_FETCHING' }
+  | { readonly type: 'DONE_SOURCE_MAP_FETCHING' }
+  | { readonly type: 'START_SOURCE_MAP_SYMBOLICATION' }
+  | { readonly type: 'SOURCE_MAP_SYMBOLICATION_FAILED' }
+  | {
+      readonly type: 'BULK_SOURCE_MAP_SYMBOLICATION';
+      readonly newFuncTable: RawFuncTable;
+      readonly newFrameTable: RawFrameTable;
+      readonly newSourceLocationTable: SourceLocationTable;
+      readonly newSources: SourceTable;
+      readonly newStringArray: string[];
     };
 
 type UrlEnhancerAction =
@@ -506,12 +538,17 @@ type UrlStateAction =
   | {
       readonly type: 'CHANGE_INVERT_CALLSTACK';
       readonly invertCallstack: boolean;
+      readonly selectedTab: TabSlug;
       readonly newSelectedCallNodePath: CallNodePath;
       readonly selectedThreadIndexes: Set<ThreadIndex>;
     }
   | {
       readonly type: 'CHANGE_SHOW_USER_TIMINGS';
       readonly showUserTimings: boolean;
+    }
+  | {
+      readonly type: 'CHANGE_INCLUDE_IDLE_SAMPLES';
+      readonly includeIdleSamples: boolean;
     }
   | {
       readonly type: 'CHANGE_STACK_CHART_SAME_WIDTHS';
@@ -526,6 +563,10 @@ type UrlStateAction =
       readonly searchString: string;
     }
   | {
+      readonly type: 'CHANGE_MARKER_TABLE_SORT';
+      readonly sort: SingleColumnSortState[] | null;
+    }
+  | {
       readonly type: 'CHANGE_NETWORK_SEARCH_STRING';
       readonly searchString: string;
     }
@@ -538,9 +579,17 @@ type UrlStateAction =
       readonly type: 'SANITIZED_PROFILE_PUBLISHED';
       readonly hash: string;
       readonly committedRanges: StartEndRange[] | null;
-      readonly oldThreadIndexToNew: Map<ThreadIndex, ThreadIndex> | null;
+      readonly translationMaps: ProfileIndexTranslationMaps | null;
       readonly profileName: string;
       readonly prePublishedState: State | null;
+      // URL-state track-index references in the post-sanitization track-index
+      // space, populated when sanitization re-indexed tracks
+      // (translationMaps.oldThreadIndexToNew is non-null). When null, the
+      // existing reducer state is left untouched.
+      readonly hiddenGlobalTracks: Set<TrackIndex> | null;
+      readonly globalTrackOrder: TrackIndex[] | null;
+      readonly hiddenLocalTracksByPid: Map<Pid, Set<TrackIndex>> | null;
+      readonly localTrackOrderByPid: Map<Pid, TrackIndex[]> | null;
     }
   | {
       readonly type: 'SET_DATA_SOURCE';
@@ -601,12 +650,14 @@ type SidebarAction = {
 type PublishAction =
   | {
       readonly type: 'UPDATE_SHARING_OPTION';
+      readonly mode: SharingMode;
       readonly slug: keyof CheckedSharingOptions;
       readonly value: boolean;
     }
   | {
       readonly type: 'SANITIZED_PROFILE_ENCODING_STARTED';
       readonly sanitizedProfile: Profile;
+      readonly encodingPromise: Promise<ProfileEncodingResult>;
     }
   | {
       readonly type: 'SANITIZED_PROFILE_ENCODING_COMPLETED';

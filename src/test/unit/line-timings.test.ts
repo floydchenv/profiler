@@ -5,10 +5,11 @@
 import { getProfileFromTextSamples } from '../fixtures/profiles/processed-profile';
 import {
   getStackLineInfo,
-  getStackLineInfoForCallNode,
   getLineTimings,
+  getTotalLineTimingsForCallNode,
 } from 'firefox-profiler/profile-logic/line-timings';
 import {
+  getCallNodeFramePerStack,
   getCallNodeInfo,
   getInvertedCallNodeInfo,
 } from '../../profile-logic/profile-data';
@@ -17,7 +18,9 @@ import type {
   CallNodePath,
   Thread,
   IndexIntoCategoryList,
+  LineNumber,
 } from 'firefox-profiler/types';
+import { FrameFlag, FuncFlag } from 'firefox-profiler/types';
 
 describe('getStackLineInfo', function () {
   it('computes results for all stacks', function () {
@@ -37,26 +40,36 @@ describe('getStackLineInfo', function () {
       stackTable,
       frameTable,
       funcTable,
-      fileOneSourceIndex
+      fileOneSourceIndex,
+      thread.sourceLocationTable
     );
 
-    // Expect the returned arrays to have the same length as the stackTable.
+    // Expect the returned stackIndexToLineSetIndex array to have the same length as the stackTable.
     expect(stackTable.length).toBe(9);
-    expect(stackLineInfoOne.selfLine.length).toBe(9);
-    expect(stackLineInfoOne.stackLines.length).toBe(9);
+    expect(stackLineInfoOne.stackIndexToLineSetIndex.length).toBe(9);
+
+    expect(stackLineInfoOne.lineSetTable.length).toBe(7);
   });
 });
 
 describe('getLineTimings for getStackLineInfo', function () {
   function getTimings(thread: Thread, file: string) {
-    const { stackTable, frameTable, funcTable, samples, stringTable } = thread;
+    const {
+      stackTable,
+      frameTable,
+      funcTable,
+      samples,
+      stringTable,
+      sourceLocationTable,
+    } = thread;
     const fileStringIndex = stringTable.indexForString(file);
     const fileSourceIndex = thread.sources.filename.indexOf(fileStringIndex);
     const stackLineInfo = getStackLineInfo(
       stackTable,
       frameTable,
       funcTable,
-      fileSourceIndex
+      fileSourceIndex,
+      sourceLocationTable
     );
     return getLineTimings(stackLineInfo, samples);
   }
@@ -122,14 +135,16 @@ describe('getLineTimings for getStackLineInfo', function () {
     const [thread] = derivedThreads;
     const { stackTable, frameTable, funcTable, samples, stringTable } = thread;
 
-    // Manually set frameTable.line to null for the leaf frame
+    // Manually clear the HasLine flag for the leaf frame
     // to simulate a case where frame line info is missing
     const leafFrame = stackTable.frame[stackTable.length - 1];
-    frameTable.line[leafFrame] = null;
+    frameTable.flags[leafFrame] &= ~FrameFlag.HasLine;
+    frameTable.line[leafFrame] = 0;
 
     // Set funcTable.lineNumber to a value for the func of that frame
     const func = frameTable.func[leafFrame];
     funcTable.lineNumber[func] = 35;
+    funcTable.flags[func] |= FuncFlag.HasLine;
 
     const fileStringIndex = stringTable.indexForString('file.js');
     const fileSourceIndex = thread.sources.filename.indexOf(fileStringIndex);
@@ -137,7 +152,8 @@ describe('getLineTimings for getStackLineInfo', function () {
       stackTable,
       frameTable,
       funcTable,
-      fileSourceIndex
+      fileSourceIndex,
+      thread.sourceLocationTable
     );
     const lineTimings = getLineTimings(stackLineInfo, samples);
 
@@ -146,16 +162,81 @@ describe('getLineTimings for getStackLineInfo', function () {
     expect(lineTimings.totalLineHits.get(20)).toBe(1);
     expect(lineTimings.totalLineHits.get(35)).toBe(1);
   });
+
+  it("attributes the func's original line when the frame is not source-mapped but the func is", function () {
+    // Case from the source-map symbolication design: the func definition was
+    // mapped to an original source, but the frame's execution point was not
+    // (e.g. it lacked line/column info, so it was never submitted for
+    // symbolication). Source determination falls back to the func's original
+    // source, so line attribution must also come from the func's originalLocation
+    // entry. Otherwise we'd attribute the compiled line value in
+    // frameTable.line[frame] onto an original-source view.
+    const { derivedThreads } = getProfileFromTextSamples(`
+      A[file:compiled.js][line:5]
+      B[file:compiled.js][line:7]
+    `);
+    const [thread] = derivedThreads;
+    const { stackTable, frameTable, funcTable, samples, stringTable } = thread;
+
+    // Register an additional source representing the original .ts file.
+    const originalFilenameIndex = stringTable.indexForString('original.ts');
+    const originalSourceIndex = thread.sources.length;
+    thread.sources.id.push(null);
+    thread.sources.filename.push(originalFilenameIndex);
+    thread.sources.sourceMapURL.push(null);
+    thread.sources.content.push(null);
+    thread.sources.length++;
+
+    // For both funcs, add a sourceLocationTable entry pointing at the original
+    // source at a known line. Leave frameTable.originalLocation as null on
+    // every frame. That is the case under test.
+    const funcAIndex = frameTable.func[stackTable.frame[0]];
+    const funcBIndex = frameTable.func[stackTable.frame[stackTable.length - 1]];
+    const funcALine = 100;
+    const funcBLine = 200;
+    const sourceLocationTable = thread.sourceLocationTable;
+    sourceLocationTable.source.push(originalSourceIndex, originalSourceIndex);
+    sourceLocationTable.line.push(funcALine, funcBLine);
+    sourceLocationTable.column.push(1, 1);
+    const funcAOriginalLocationIdx = sourceLocationTable.length;
+    const funcBOriginalLocationIdx = sourceLocationTable.length + 1;
+    sourceLocationTable.length += 2;
+    funcTable.originalLocation[funcAIndex] = funcAOriginalLocationIdx;
+    funcTable.originalLocation[funcBIndex] = funcBOriginalLocationIdx;
+    funcTable.flags[funcAIndex] |= FuncFlag.HasOriginalLocation;
+    funcTable.flags[funcBIndex] |= FuncFlag.HasOriginalLocation;
+
+    const stackLineInfo = getStackLineInfo(
+      stackTable,
+      frameTable,
+      funcTable,
+      originalSourceIndex,
+      sourceLocationTable
+    );
+    const lineTimings = getLineTimings(stackLineInfo, samples);
+
+    // Without the fix, the compiled line numbers (5 and 7) would have been
+    // attributed to the original-source view. With the fix, the func's
+    // original lines are used.
+    expect(lineTimings.selfLineHits.get(funcBLine)).toBe(1);
+    expect(lineTimings.selfLineHits.size).toBe(1);
+    expect(lineTimings.totalLineHits.get(funcALine)).toBe(1);
+    expect(lineTimings.totalLineHits.get(funcBLine)).toBe(1);
+    expect(lineTimings.totalLineHits.size).toBe(2);
+    expect(lineTimings.selfLineHits.get(5)).toBe(undefined);
+    expect(lineTimings.selfLineHits.get(7)).toBe(undefined);
+  });
 });
 
-describe('getLineTimings for getStackLineInfoForCallNode', function () {
+describe('getTotalLineTimingsForCallNode', function () {
   function getTimings(
     thread: Thread,
     callNodePath: CallNodePath,
     defaultCategory: IndexIntoCategoryList,
     isInverted: boolean
-  ) {
-    const { stackTable, frameTable, funcTable, samples } = thread;
+  ): Map<LineNumber, number> {
+    const { stackTable, frameTable, funcTable, samples, sourceLocationTable } =
+      thread;
     const nonInvertedCallNodeInfo = getCallNodeInfo(
       stackTable,
       frameTable,
@@ -172,14 +253,21 @@ describe('getLineTimings for getStackLineInfoForCallNode', function () {
       callNodeInfo.getCallNodeIndexFromPath(callNodePath),
       'invalid call node path'
     );
-    const stackLineInfo = getStackLineInfoForCallNode(
-      stackTable,
+    const callNodeFramePerStack = getCallNodeFramePerStack(
+      callNodeIndex,
+      callNodeInfo,
+      stackTable
+    );
+    const funcLine =
+      funcTable.lineNumber[callNodeInfo.funcForNode(callNodeIndex)];
+    return getTotalLineTimingsForCallNode(
+      samples,
+      callNodeFramePerStack,
       frameTable,
       funcTable,
-      callNodeIndex,
-      callNodeInfo
+      funcLine,
+      sourceLocationTable
     );
-    return getLineTimings(stackLineInfo, samples);
   }
 
   it('passes a basic test', function () {
@@ -193,19 +281,16 @@ describe('getLineTimings for getStackLineInfoForCallNode', function () {
     const [thread] = derivedThreads;
 
     // Compute the line timings for the root call node.
-    // No self line hit, one total line hit in line 20.
+    // One total line hit in line 20.
     const lineTimingsRoot = getTimings(thread, [A], defaultCategory, false);
-    expect(lineTimingsRoot.totalLineHits.get(20)).toBe(1);
-    expect(lineTimingsRoot.totalLineHits.size).toBe(1); // no other hits
-    expect(lineTimingsRoot.selfLineHits.size).toBe(0); // no self hits
+    expect(lineTimingsRoot.get(20)).toBe(1);
+    expect(lineTimingsRoot.size).toBe(1); // no other hits
 
     // Compute the line timings for the child call node.
-    // One self line hit in line 30, which is also the only total line hit.
+    // One total line hit in line 30.
     const lineTimingsChild = getTimings(thread, [A, B], defaultCategory, false);
-    expect(lineTimingsChild.totalLineHits.get(30)).toBe(1);
-    expect(lineTimingsChild.totalLineHits.size).toBe(1); // no other hits
-    expect(lineTimingsChild.selfLineHits.get(30)).toBe(1);
-    expect(lineTimingsChild.selfLineHits.size).toBe(1); // no other hits
+    expect(lineTimingsChild.get(30)).toBe(1);
+    expect(lineTimingsChild.size).toBe(1); // no other hits
   });
 
   it('passes a basic test with recursion', function () {
@@ -220,14 +305,13 @@ describe('getLineTimings for getStackLineInfoForCallNode', function () {
     const [thread] = derivedThreads;
 
     // Compute the line timings for the root call node.
-    // No self line hit, one total line hit in line 20.
+    // One total line hit in line 20.
     const lineTimingsRoot = getTimings(thread, [A], defaultCategory, false);
-    expect(lineTimingsRoot.totalLineHits.get(20)).toBe(1);
-    expect(lineTimingsRoot.totalLineHits.size).toBe(1); // no other hits
-    expect(lineTimingsRoot.selfLineHits.size).toBe(0); // no self hits
+    expect(lineTimingsRoot.get(20)).toBe(1);
+    expect(lineTimingsRoot.size).toBe(1); // no other hits
 
     // Compute the line timings for the leaf call node.
-    // One self line hit in line 21, which is also the only total line hit.
+    // One total line hit in line 21.
     // In particular, we shouldn't record a hit for line 20, even though
     // the hit at line 20 is also in A. But it's in the wrong call node.
     const lineTimingsChild = getTimings(
@@ -236,10 +320,8 @@ describe('getLineTimings for getStackLineInfoForCallNode', function () {
       defaultCategory,
       false
     );
-    expect(lineTimingsChild.totalLineHits.get(21)).toBe(1);
-    expect(lineTimingsChild.totalLineHits.size).toBe(1); // no other hits
-    expect(lineTimingsChild.selfLineHits.get(21)).toBe(1);
-    expect(lineTimingsChild.selfLineHits.size).toBe(1); // no other hits
+    expect(lineTimingsChild.get(21)).toBe(1);
+    expect(lineTimingsChild.size).toBe(1); // no other hits
   });
 
   it('passes a test where the same function is called via different call paths', function () {
@@ -260,11 +342,9 @@ describe('getLineTimings for getStackLineInfoForCallNode', function () {
       defaultCategory,
       false
     );
-    expect(lineTimingsABC.totalLineHits.get(10)).toBe(1);
-    expect(lineTimingsABC.totalLineHits.get(12)).toBe(1);
-    expect(lineTimingsABC.totalLineHits.size).toBe(2); // no other hits
-    expect(lineTimingsABC.selfLineHits.get(10)).toBe(1);
-    expect(lineTimingsABC.selfLineHits.size).toBe(1); // no other hits
+    expect(lineTimingsABC.get(10)).toBe(1);
+    expect(lineTimingsABC.get(12)).toBe(1);
+    expect(lineTimingsABC.size).toBe(2); // no other hits
   });
 
   it('passes a test with an inverted thread', function () {
@@ -279,29 +359,22 @@ describe('getLineTimings for getStackLineInfoForCallNode', function () {
     const [{ A, B, C, D }] = funcNamesDictPerThread;
     const [thread] = derivedThreads;
 
-    // For the root D of the inverted tree, we have 3 self line hits.
+    // For the root D of the inverted tree, we have 3 total line hits.
     const lineTimingsD = getTimings(thread, [D], defaultCategory, true);
-    expect(lineTimingsD.totalLineHits.get(51)).toBe(2);
-    expect(lineTimingsD.totalLineHits.get(52)).toBe(1);
-    expect(lineTimingsD.totalLineHits.size).toBe(2); // no other hits
-    expect(lineTimingsD.selfLineHits.get(51)).toBe(2);
-    expect(lineTimingsD.selfLineHits.get(52)).toBe(1);
-    expect(lineTimingsD.selfLineHits.size).toBe(2); // no other hits
+    expect(lineTimingsD.get(51)).toBe(2);
+    expect(lineTimingsD.get(52)).toBe(1);
+    expect(lineTimingsD.size).toBe(2); // no other hits
 
     // For the C call node which is a child (direct caller) of D, we have
-    // no self line hit and one hit in line 12.
+    // one hit in line 12.
     const lineTimingsDC = getTimings(thread, [D, C], defaultCategory, true);
-    expect(lineTimingsDC.totalLineHits.get(12)).toBe(1);
-    expect(lineTimingsDC.totalLineHits.size).toBe(1); // no other hits
-    expect(lineTimingsDC.selfLineHits.size).toBe(0); // no self line hits
+    expect(lineTimingsDC.get(12)).toBe(1);
+    expect(lineTimingsDC.size).toBe(1); // no other hits
 
-    // For the D <- B <- A call node, we have no self line hit, and one total
-    // hit in line 20. (No self line hit because that sample's self time is
-    // spent in D, not in A.)
+    // For the D <- B <- A call node, we have one total hit in line 20.
     const lineTimingsDBA = getTimings(thread, [D, B, A], defaultCategory, true);
-    expect(lineTimingsDBA.totalLineHits.get(20)).toBe(1);
-    expect(lineTimingsDBA.totalLineHits.size).toBe(1); // no other hits
-    expect(lineTimingsDC.selfLineHits.size).toBe(0); // no self line hits
+    expect(lineTimingsDBA.get(20)).toBe(1);
+    expect(lineTimingsDBA.size).toBe(1); // no other hits
   });
 
   it('falls back to funcTable.lineNumber when frameTable.line is null', function () {
@@ -315,21 +388,21 @@ describe('getLineTimings for getStackLineInfoForCallNode', function () {
     const [thread] = derivedThreads;
     const { stackTable, frameTable, funcTable } = thread;
 
-    // Manually set frameTable.line to null for the leaf frame
+    // Manually clear the HasLine flag for the leaf frame
     // to simulate a case where frame line info is missing
     const leafFrame = stackTable.frame[stackTable.length - 1];
-    frameTable.line[leafFrame] = null;
+    frameTable.flags[leafFrame] &= ~FrameFlag.HasLine;
+    frameTable.line[leafFrame] = 0;
 
     // Set funcTable.lineNumber to a value for the func of that frame
     const func = frameTable.func[leafFrame];
     funcTable.lineNumber[func] = 35;
+    funcTable.flags[func] |= FuncFlag.HasLine;
 
     // Compute the line timings for the child call node.
     // The fallback should use funcTable.lineNumber[func] = 35
     const lineTimingsChild = getTimings(thread, [A, B], defaultCategory, false);
-    expect(lineTimingsChild.totalLineHits.get(35)).toBe(1);
-    expect(lineTimingsChild.totalLineHits.size).toBe(1); // no other hits
-    expect(lineTimingsChild.selfLineHits.get(35)).toBe(1);
-    expect(lineTimingsChild.selfLineHits.size).toBe(1); // no other hits
+    expect(lineTimingsChild.get(35)).toBe(1);
+    expect(lineTimingsChild.size).toBe(1); // no other hits
   });
 });

@@ -21,6 +21,16 @@ AppHeader--app-header = <header>{ -profiler-brand-name }</header> — <subheader
 AppHeader--github-icon =
     .title = 前往我們的 Git 儲存庫（開啟新視窗）
 
+## ThemeToggle
+## They are used at the top right side of the home page to switch between themes.
+
+ThemeToggle--system =
+    .title = 跟隨系統佈景主題偏好設定
+ThemeToggle--light =
+    .title = 使用亮色佈景主題
+ThemeToggle--dark =
+    .title = 使用暗色佈景主題
+
 ## AppViewRouter
 ## This is used for displaying errors when loading the application.
 
@@ -36,6 +46,11 @@ AppViewRouter--error-compare = 無法取得效能檢測檔。
 # https://profiler.firefox.com/from-url/http%3A%2F%2F127.0.0.1%3A3000%2Fprofile.json/
 AppViewRouter--error-from-localhost-url-safari = 由於 <a>Safari 的特殊限制</a>，{ -profiler-brand-name } 無法從這套瀏覽器自本機匯入效能檢測檔。請改用 { -firefox-brand-name } 或 Chrome 開啟此頁面。
     .title = 無法使用 Safari 匯入本機效能檢測檔
+# This error message is displayed when the profile is in a newer format version
+# than this build of the Profiler is able to read.
+AppViewRouter--error-profile-version =
+    此版本的 { -profiler-brand-name } 不支援此效能檢測檔使用的格式。
+    請嘗試重新整理頁面，看看是否有 { -profiler-brand-name } 的更新可以使用。
 AppViewRouter--route-not-found--home =
     .specialMessage = 無法處理您嘗試開啟的網址。
 
@@ -60,13 +75,25 @@ CallNodeContextMenu--transform-merge-call-node = 只合併節點
     .title = 合併節點後會將其從效能檢測檔移除，並將時間歸入呼叫該節點的函數節點。只會移除效能樹當中特定部分的函數，其他對該函數呼叫的部分將保留在檢測檔中。
 # This is used as the context menu item title for "Focus on function" and "Focus
 # on function (inverted)" transforms.
-CallNodeContextMenu--transform-focus-function-title = 聚焦於函數，將移除該函數之外所有紀錄到的項目。除此之外，還會重新將呼叫樹的根指定為該函數。此功能可以將檢測檔中的多個函數呼叫點合併為單一呼叫節點。
+CallNodeContextMenu--transform-focus-function-title = 聚焦於函數，將移除該函數之外所有紀錄到的樣本。除此之外，還會重新將呼叫樹的根指定為該函數。此功能可以將檢測檔中的多個函數呼叫點合併為單一呼叫節點。
 CallNodeContextMenu--transform-focus-function = 聚焦於函數
     .title = { CallNodeContextMenu--transform-focus-function-title }
 CallNodeContextMenu--transform-focus-function-inverted = 聚焦於函數（反向）
     .title = { CallNodeContextMenu--transform-focus-function-title }
+
+## The translation for "self" in these strings should match the translation used
+## in CallTree--samples-self and CallTree--bytes-self. Alternatively it can be
+## translated as "self values" or "self time" (though "self time" is less desirable
+## because this menu item is also shown in "bytes" mode).
+
+CallNodeContextMenu--transform-focus-self-title = 聚焦於 self 與聚焦於函數類似，但只保留與函數的 self 時間有關的樣本。將捨棄被呼叫者的樣本，並將呼叫樹重新放置於聚焦的函數根上。
+CallNodeContextMenu--transform-focus-self = 只聚焦於 self
+    .title = { CallNodeContextMenu--transform-focus-self-title }
+
+##
+
 CallNodeContextMenu--transform-focus-subtree = 只聚焦於子樹
-    .title = 聚焦於子樹，將從呼叫樹中拉出分支，並移除不屬於該分支的內容。然而此功能只對單一呼叫節點有效，將忽略其他呼叫該函數的部分。
+    .title = 聚焦於子樹，將從呼叫樹中拉出分支，並移除不屬於該分支的樣本。然而此功能只對單一呼叫節點有效，將忽略其他呼叫該函數的部分。
 # This is used as the context menu item to apply the "Focus on category" transform.
 # Variables:
 #   $categoryName (String) - Name of the category to focus on.
@@ -155,9 +182,9 @@ CallTreeSidebar--running-time =
 CallTreeSidebar--self-time =
     .label = Self 時間
 CallTreeSidebar--running-samples =
-    .label = 執行取樣
+    .label = 執行中的樣本
 CallTreeSidebar--self-samples =
-    .label = Self 取樣
+    .label = Self 樣本
 CallTreeSidebar--running-size =
     .label = 執行大小
 CallTreeSidebar--self-size =
@@ -165,10 +192,10 @@ CallTreeSidebar--self-size =
 CallTreeSidebar--categories = 分類
 CallTreeSidebar--implementation = 實作
 CallTreeSidebar--running-milliseconds = 執行時間（ms）
-CallTreeSidebar--running-sample-count = 執行取樣數
+CallTreeSidebar--running-sample-count = 執行中的樣本數
 CallTreeSidebar--running-bytes = 執行位元組
 CallTreeSidebar--self-milliseconds = Self 時間（ms）
-CallTreeSidebar--self-sample-count = Self 取樣數
+CallTreeSidebar--self-sample-count = Self 樣本數
 CallTreeSidebar--self-bytes = Self 位元組
 
 ## CompareHome
@@ -209,16 +236,17 @@ ErrorBoundary--report-error-to-developers-description = 請將此問題報告給
 # This is used in a call to action button, displayed inside the error box.
 ErrorBoundary--report-error-on-github = 到 GitHub 回報錯誤
 
-## Footer Links
+## Settings Menu
+## The settings popup opened from the cog icon in the top bar.
 
-FooterLinks--legal = 法律資訊
-FooterLinks--Privacy = 隱私權
-FooterLinks--Cookies = Cookie
-FooterLinks--languageSwitcher--select =
+SettingsMenu--button =
+    .title = 設定
+SettingsMenu--docs = 文件
+SettingsMenu--legal = 法律資訊
+SettingsMenu--privacy = 隱私權
+SettingsMenu--cookies = Cookie
+SettingsMenu--language-switcher =
     .title = 變更語言
-FooterLinks--hide-button =
-    .title = 隱藏頁尾鏈結
-    .aria-label = 隱藏頁尾鏈結
 
 ## FullTimeline
 ## The timeline component of the full view in the analysis UI at the top of the
@@ -251,7 +279,9 @@ Home--enable-button-unavailable =
 # This message can be seen on https://main--perf-html.netlify.app/ .
 Home--web-channel-unavailable = 此檢測器無法連線到 WebChannel。通常是因為執行檢測器的主機與 <code>devtools.performance.recording.ui-base-url</code> 偏好設定當中指定的主機不同。若您想要使用此檢測器捕捉新的效能檢測檔，並可程式化控制檢測器選單按鈕，可到 <code>about:config</code> 調整該偏好設定。
 Home--record-instructions = 請點擊檢測按鈕或按下鍵盤快速鍵即可開始進行檢測。進行效能紀錄時，此圖示將會顯示成藍色。按下<kbd>捕捉</kbd>即可將資料載入到 profiler.firefox.com。
-Home--instructions-content = 需要使用 <a>{ -firefox-brand-name }</a> 紀錄效能檢測檔。但可以使用任何現代瀏覽器檢視現有的檢測檔。
+Home--instructions-content2 = 需要使用 <a>{ -firefox-brand-name } 桌面版</a>來記錄效能檢測檔。但可以使用任何現代瀏覽器檢視現有的檢測檔。
+Home--fenix-instructions-directly = 可直接在此裝置檢測 { -firefox-android-brand-name }。若需更多資訊，請閱讀<a>直接於裝置檢測 { -firefox-android-brand-name } 效能</a>一文。
+Home--fenix-instructions-remotely = 您也可以從 { -firefox-brand-name } 對 { -firefox-android-brand-name } 進行遠端效能檢測。若需更多資訊，請參考下列文件：<a>遠端檢測 { -firefox-android-brand-name } 效能</a>。
 Home--record-instructions-start-stop = 停止或開始檢測
 Home--record-instructions-capture-load = 捕捉並載入檢測檔
 Home--profiler-motto = 捕捉效能檢測檔。分析、分享、讓網站運作更快。
@@ -259,6 +289,7 @@ Home--additional-content-title = 載入現有檢測檔
 Home--additional-content-content = 您可以將效能檢測檔<strong>拖曳</strong>到此處，或：
 Home--compare-recordings-info = 您也可以比較紀錄內容。<a>開啟比較介面。</a>
 Home--your-recent-uploaded-recordings-title = 您近期上傳的紀錄
+Home--dark-mode-title = 暗色模式
 # We replace the elements such as <perf> and <simpleperf> with links to the
 # documentation to use these tools.
 Home--load-files-from-other-tools2 =
@@ -271,8 +302,11 @@ Home--chrome-extension-recording-instructions = 安裝完成後，即可使用�
 ## IdleSearchField
 ## The component that is used for all the search inputs in the application.
 
-IdleSearchField--search-input =
-    .placeholder = 輸入過濾條件
+# `/` here overrides Firefox's Type Ahead Find shortcut, which would
+# otherwise trigger an unhelpful find bar on top of the profiler UI.
+# The shortcut itself is not localizable.
+IdleSearchField--search-input2 =
+    .placeholder = 輸入過濾條件（/）
 
 ## JsTracerSettings
 ## JSTracer is an experimental feature and it's currently disabled. See Bug 1565788.
@@ -339,7 +373,14 @@ MarkerContextMenu--select-the-sender-thread = 選擇傳送執行緒「<strong>{ 
 # This string is used on the marker filters menu item when clicked on the filter icon.
 # Variables:
 #   $filter (String) - Search string that will be used to filter the markers.
-MarkerFiltersContextMenu--drop-samples-outside-of-markers-matching = 丟棄不符合「<strong>{ $filter }</strong>」標記的取樣
+MarkerFiltersContextMenu--drop-samples-outside-of-markers-matching = 丟棄不符合「<strong>{ $filter }</strong>」標記的樣本
+
+## MarkerCopyTableContextMenu
+## This is the menu when the copy icon is clicked in Marker Chart and Marker
+## Table panels.
+
+MarkerCopyTableContextMenu--copy-table-as-plain = 用純文字格式複製標記表
+MarkerCopyTableContextMenu--copy-table-as-markdown = 用 Markdown 格式複製標記表
 
 ## MarkerSettings
 ## This is used in all panels related to markers.
@@ -349,6 +390,14 @@ MarkerSettings--panel-search =
     .title = 只顯示符合特定名稱的標記
 MarkerSettings--marker-filters =
     .title = 標記過濾器
+MarkerSettings--copy-table =
+    .title = 用純文字複製表格
+# This string is used when the user tries to copy a marker table with
+# more than 10000 rows.
+# Variable:
+#   $rows (Number) - Number of rows the marker table has
+#   $maxRows (Number) - Number of maximum rows that can be copied
+MarkerSettings--copy-table-exceeed-max-rows = 資料列數超過限制：{ $rows } > { $maxRows }，只複製最前 { $maxRows } 列。
 
 ## MarkerSidebar
 ## This is the sidebar component that is used in Marker Table panel.
@@ -370,8 +419,8 @@ MarkerTable--details = 詳細資訊
 # Variables:
 #   $filter (String) - Search string that will be used to filter the markers.
 MarkerTooltip--filter-button-tooltip =
-    .title = 只顯示符合「{ $filter }」的標記
     .aria-label = 只顯示符合「{ $filter }」的標記
+    .title = 只顯示符合「{ $filter }」的標記
 
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
@@ -380,14 +429,15 @@ MenuButtons--index--metaInfo-button =
     .label = 檢測檔資訊
 MenuButtons--index--full-view = 完整畫面
 MenuButtons--index--cancel-upload = 取消上傳
-MenuButtons--index--share-upload =
-    .label = 上傳本機檢測檔
-MenuButtons--index--share-re-upload =
-    .label = 重新上傳
+MenuButtons--index--save =
+    .label = 儲存…
+MenuButtons--index--share =
+    .label = 分享…
+MenuButtons--index--reshare =
+    .label = 重新分享…
 MenuButtons--index--share-error-uploading =
     .label = 上傳時發生錯誤
 MenuButtons--index--revert = 回復到原始檢測檔
-MenuButtons--index--docs = 文件
 MenuButtons--permalink--button =
     .label = 永久鏈結
 
@@ -405,6 +455,28 @@ MenuButtons--metaInfo--resymbolicate-profile = 重新將檢測檔符號化
 MenuButtons--metaInfo--symbolicate-profile = 符號化檢測檔
 MenuButtons--metaInfo--attempting-resymbolicate = 正在嘗試重新符號化檢測檔
 MenuButtons--metaInfo--currently-symbolicating = 目前符號化的檢測檔
+MenuButtons--metaInfo--source-maps = 原始碼對應表：
+# The trailing ellipsis indicates that clicking the button opens a file picker.
+MenuButtons--metaInfo--apply-source-map = 套用原始碼對應表…
+    .title = 從磁碟中載入 .map 檔，讓最小化過的 JavaScript 組合檔能夠符號化，以找回原始函數名稱與在原始碼中的位置。
+# Shown when the uploaded map could match more than one source and the user has
+# to choose which one it applies to.
+MenuButtons--metaInfo--source-map-choose-bundle = 選擇這份原始碼對應表要套用至哪個組合檔：
+# Button to confirm the chosen source and apply the source map to it.
+MenuButtons--metaInfo--source-map-apply = 套用
+# Button to dismiss the source chooser without symbolicating.
+MenuButtons--metaInfo--source-map-cancel = 取消
+# Shown after symbolication finished and original sources were resolved.
+# Variable:
+#   $filename (String) - The bundle source the source map was applied to.
+MenuButtons--metaInfo--source-map-success = 已解析 { $filename } 的原始碼。
+# Shown after symbolication finished but no stack positions matched the map.
+# Variable:
+#   $filename (String) - The bundle source the source map was applied to.
+MenuButtons--metaInfo--source-map-no-match = { $filename } 中沒有堆疊位置與此對應表相符。
+MenuButtons--metaInfo--source-map-error-invalid = 選擇的檔案不是有效的原始碼對應表。
+MenuButtons--metaInfo--source-map-error-no-eligible = 此檢測檔中沒有包含原始碼對應表網址的 JS 組合檔。
+MenuButtons--metaInfo--source-map-error-failed = 無法將此對應表套用至檢測檔。
 MenuButtons--metaInfo--cpu-model = CPU 型號：
 MenuButtons--metaInfo--cpu-cores = CPU 核心數：
 MenuButtons--metaInfo--main-memory = 主要記憶體：
@@ -457,7 +529,8 @@ MenuButtons--metaInfo--buffer-duration-seconds =
 MenuButtons--metaInfo--buffer-duration-unlimited = 無限制
 MenuButtons--metaInfo--application = 應用程式
 MenuButtons--metaInfo--name-and-version = 名稱與版本：
-MenuButtons--metaInfo--application-uptime = 運作時間：
+# The time between application startup and when the profiler was started
+MenuButtons--metaInfo--application-uptime2 = Uptime：
 MenuButtons--metaInfo--update-channel = 更新頻道：
 MenuButtons--metaInfo--build-id = Build ID：
 MenuButtons--metaInfo--build-type = Build Type：
@@ -500,7 +573,7 @@ MenuButtons--metaOverheadStatistics-statkeys-cleaning = 清理
 MenuButtons--metaOverheadStatistics-statkeys-counter = 計數
     .title = 用來取得所有計數器的時間。
 MenuButtons--metaOverheadStatistics-statkeys-interval = 間隔
-    .title = 兩次計量間的間隔。
+    .title = 兩次取樣的間隔。
 MenuButtons--metaOverheadStatistics-statkeys-lockings = 鎖定
     .title = 進行計量前取得鎖定所需的時間。
 MenuButtons--metaOverheadStatistics-overhead-duration = 額外負荷持續時間：
@@ -520,9 +593,15 @@ MenuButtons--publish--renderCheckbox-label-preference = 包含偏好設定值
 MenuButtons--publish--renderCheckbox-label-private-browsing = 包含來自隱私瀏覽視窗的資料
 MenuButtons--publish--renderCheckbox-label-private-browsing-warning-image =
     .title = 此效能檢測檔包含隱私瀏覽資料
-MenuButtons--publish--reupload-performance-profile = 重新上傳效能檢測檔
+MenuButtons--publish--renderCheckbox-label-argument-values = 包含 JavaScript 執行追蹤函數的參數值
+MenuButtons--publish--renderCheckbox-label-argument-values-warning-image =
+    .title = 此檢測檔包含從頁面記錄到的函數參數值，可能包含個人資料
 MenuButtons--publish--share-performance-profile = 分享效能檢測檔
+MenuButtons--publish--reshare-performance-profile = 重新分享效能檢測檔
+MenuButtons--publish--save-performance-profile = 儲存效能檢測檔
+MenuButtons--publish--local-profile-description = 這份效能分析資料尚未上傳，關閉此分頁後就會遺失。若要保留，請將其儲存至電腦，或使用「分享」功能上傳。
 MenuButtons--publish--info-description = 上傳您的檢測檔並透過鏈結分享，讓任何取得該鏈結的人都能存取。
+MenuButtons--publish--download-info-description = 將此設定檔另存至您的電腦上。
 MenuButtons--publish--info-description-default = 預設情況下，將會移除您的個人資料。
 MenuButtons--publish--info-description-firefox-nightly2 = 此檢測檔來自 { -firefox-nightly-brand-name }，預設情況下將包含大部分資訊。
 MenuButtons--publish--include-additional-data = 包含其他資料後，可能造成檢測檔可被識別。
@@ -531,7 +610,7 @@ MenuButtons--publish--upload-title = 正在上傳檢測檔…
 MenuButtons--publish--cancel-upload = 取消上傳
 MenuButtons--publish--message-something-went-wrong = 哇喔，上傳檢測檔時發生某些錯誤。
 MenuButtons--publish--message-try-again = 再試一次
-MenuButtons--publish--download = 下載
+MenuButtons--publish--save = 儲存
 MenuButtons--publish--compressing = 壓縮中…
 MenuButtons--publish--error-while-compressing = 壓縮時發生錯誤，請嘗試取消勾選部分項目來縮小檢測檔。
 
@@ -566,8 +645,8 @@ PanelSearch--search-field-hint = 您知道可以使用半形逗號（,）搜尋�
 ProfileName--edit-profile-name-button =
     .title = 編輯效能檢測檔名稱
 ProfileName--edit-profile-name-input =
-    .title = 編輯效能檢測檔名稱
     .aria-label = 效能檢測檔名稱
+    .title = 編輯效能檢測檔名稱
 
 ## Profile Delete Button
 
@@ -646,8 +725,8 @@ ServiceWorkerManager--updated-while-not-ready =
     您可能會遇到某些不正常的部分。
 ServiceWorkerManager--new-version-is-ready = 已下載新版本的應用程式，準備好可以使用。
 ServiceWorkerManager--hide-notice-button =
-    .title = 隱藏重新載入通知
     .aria-label = 隱藏重新載入通知
+    .title = 隱藏重新載入通知
 
 ## StackSettings
 ## This is the settings component that is used in Call Tree, Flame Graph and Stack
@@ -676,6 +755,8 @@ StackSettings--call-tree-strategy-native-deallocations-sites = 取消分配的�
     .title = 依照取消分配記憶體的位置，根據取消分配的記憶體位元組數進行摘要
 StackSettings--invert-call-stack = 反轉呼叫堆疊
     .title = 依照呼叫節點當中花費的時間排序，並忽略其 children。
+StackSettings--include-idle-samples = 包含閒置的樣本
+    .title = 取消勾選即可隱藏 leaf frame 屬於閒置分類的樣本。
 StackSettings--show-user-timing = 顯示使用者計時
 StackSettings--use-stack-chart-same-widths = 將每個堆疊以相同寬度顯示
 StackSettings--panel-search =
@@ -742,9 +823,26 @@ TrackNameButton--hide-process =
 ## the UI. To learn more about it, visit:
 ## https://profiler.firefox.com/docs/#/./memory-allocations?id=memory-track
 
-TrackMemoryGraph--relative-memory-at-this-time = 此時的相對記憶體用量
-TrackMemoryGraph--memory-range-in-graph = 圖表中的記憶體範圍
-TrackMemoryGraph--allocations-and-deallocations-since-the-previous-sample = 上次取樣以來的分配與取消分配
+# Variables:
+#   $value (String) - the relative memory at this time (e.g. "5MB")
+TrackMemoryGraph--relative-memory-at-this-time2 = { $value }
+    .label = 此時間點的相對記憶體
+# Variables:
+#   $value (String) - the memory range across the graph (e.g. "5MB")
+TrackMemoryGraph--memory-range-in-graph2 = { $value }
+    .label = 圖表中的記憶體範圍
+# Variables:
+#   $value (String) - count of allocations and deallocations since the previous sample
+TrackMemoryGraph--allocations-and-deallocations-since-the-previous-sample2 = { $value }
+    .label = 自上一次取樣的分配與取消分配
+
+## TrackProcessCPUGraph
+## This is used to show the CPU usage of a process over time in the timeline.
+
+# Variables:
+#   $value (String) - the CPU usage at this sample (e.g. "50%")
+TrackProcessCPUGraph--cpu = { $value }
+    .label = CPU
 
 ## TrackPower
 ## This is used to show the power used by the CPU and other chips in a computer,
@@ -771,6 +869,11 @@ TrackPower--tooltip-power-watt = { $value } W
 #   $value (String) - the power value at this location
 TrackPower--tooltip-power-milliwatt = { $value } mW
     .label = 功率
+# This is used in the tooltip when the instant power value uses the microwatt unit.
+# Variables:
+#   $value (String) - the power value at this location
+TrackPower--tooltip-power-microwatt = { $value } μW
+    .label = 功率
 # This is used in the tooltip when the power value uses the kilowatt unit.
 # Variables:
 #   $value (String) - the power value at this location
@@ -786,6 +889,11 @@ TrackPower--tooltip-average-power-watt = { $value } W
 #   $value (String) - the power value at this location
 TrackPower--tooltip-average-power-milliwatt = { $value } mW
     .label = 目前選擇範圍的平均功率
+# This is used in the tooltip when the power value uses the microwatt unit.
+# Variables:
+#   $value (String) - the power value at this location
+TrackPower--tooltip-average-power-microwatt = { $value } μW
+    .label = 目前選擇範圍中的平均電力
 # This is used in the tooltip when the energy used in the current range uses the
 # kilowatt-hour unit.
 # Variables:
@@ -920,6 +1028,12 @@ TransformNavigator--focus-subtree = 聚焦節點：{ $item }
 # Variables:
 #   $item (String) - Name of the function that transform applied to.
 TransformNavigator--focus-function = 聚焦：{ $item }
+# "Focus self" transform.
+# See: https://profiler.firefox.com/docs/#/./guide-filtering-call-trees?id=focus-on-function-self
+# Also see the translation note above CallNodeContextMenu--transform-focus-self.
+# Variables:
+#   $item (String) - Name of the function that transform applied to.
+TransformNavigator--focus-self = 聚焦 self：{ $item }
 # "Focus category" transform. The word "Focus" has the meaning of an adjective here.
 # See: https://profiler.firefox.com/docs/#/./guide-filtering-call-trees?id=focus-category
 # Variables:
@@ -958,7 +1072,7 @@ TransformNavigator--collapse-function-subtree = 摺疊子樹：{ $item }
 # "Drop samples outside of markers matching ..." transform.
 # Variables:
 #   $item (String) - Search filter of the markers that transform will apply to.
-TransformNavigator--drop-samples-outside-of-markers-matching = 丟棄不符合「{ $item }」標記的取樣
+TransformNavigator--drop-samples-outside-of-markers-matching = 丟棄不符合「{ $item }」標記的樣本
 
 ## "Bottom box" - a view which contains the source view and the assembly view,
 ## at the bottom of the profiler UI
@@ -991,6 +1105,12 @@ BottomBox--assembly-code-not-available-title = 無法取得機器碼
 # Elements:
 #   <a>link text</a> - A link to the github issue about supported scenarios.
 BottomBox--assembly-code-not-available-text = 關於支援的使用情境與規劃中的改進，請參考<a>issue #4520</a>。
+# The toggle button for making the bottom box fullscreen.
+BottomBox--hide-fullscreen =
+    .title = 離開全螢幕模式
+# The toggle button for making the bottom box fullscreen.
+BottomBox--show-fullscreen =
+    .title = 全螢幕
 SourceView--close-button =
     .title = 關閉原始碼畫面
 
@@ -1065,6 +1185,17 @@ AssemblyView--show-button =
 # Assembly refers to the low-level programming language.
 AssemblyView--hide-button =
     .title = 隱藏機器碼畫面
+# The "◀" button above the assembly view.
+AssemblyView--prev-button =
+    .title = 上一個
+# The "▶" button above the assembly view.
+AssemblyView--next-button =
+    .title = 下一個
+# The label showing the current position and total count above the assembly view.
+# Variables:
+#   $current (Number) - The current position (1-indexed).
+#   $total (Number) - The total count.
+AssemblyView--position-label = 第 { $current } 個，共 { $total } 個
 
 ## UploadedRecordingsHome
 ## This is the page that displays all the profiles that user has uploaded.

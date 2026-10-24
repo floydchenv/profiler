@@ -415,48 +415,88 @@ exports[`FlameGraph matches the snapshot 1`] = `
       <li
         class="panelSettingsListItem"
       >
-        <input
-          checked=""
-          class="photon-radio photon-radio-micro"
-          id="implementation-radio-combined"
-          title="Do not filter the stack frames"
-          type="radio"
-          value="combined"
-        />
         <label
-          class="photon-label photon-label-micro photon-label-horiz-padding"
+          class="photon-label photon-label-micro"
           for="implementation-radio-combined"
-          title="Do not filter the stack frames"
         >
-          All frames
+          <input
+            checked=""
+            class="photon-radio photon-radio-micro"
+            id="implementation-radio-combined"
+            title="Do not filter the stack frames"
+            type="radio"
+            value="combined"
+          />
+          <span
+            class="photon-label-horiz-padding"
+          >
+            All frames
+          </span>
         </label>
-        <input
-          class="photon-radio photon-radio-micro"
-          id="implementation-radio-js"
-          title="Show only the stack frames related to script execution"
-          type="radio"
-          value="js"
-        />
         <label
-          class="photon-label photon-label-micro photon-label-horiz-padding"
+          class="photon-label photon-label-micro"
           for="implementation-radio-js"
-          title="Show only the stack frames related to script execution"
         >
-          Script
+          <input
+            class="photon-radio photon-radio-micro"
+            id="implementation-radio-js"
+            title="Show only the stack frames related to script execution"
+            type="radio"
+            value="js"
+          />
+          <span
+            class="photon-label-horiz-padding"
+          >
+            Script
+          </span>
         </label>
-        <input
-          class="photon-radio photon-radio-micro"
-          id="implementation-radio-cpp"
-          title="Show only the stack frames for native code"
-          type="radio"
-          value="cpp"
-        />
+        <label
+          class="photon-label photon-label-micro"
+          for="implementation-radio-cpp"
+        >
+          <input
+            class="photon-radio photon-radio-micro"
+            id="implementation-radio-cpp"
+            title="Show only the stack frames for native code"
+            type="radio"
+            value="cpp"
+          />
+          <span
+            class="photon-label-horiz-padding"
+          >
+            Native
+          </span>
+        </label>
+      </li>
+      <li
+        class="panelSettingsListItem"
+      >
         <label
           class="photon-label photon-label-micro photon-label-horiz-padding"
-          for="implementation-radio-cpp"
-          title="Show only the stack frames for native code"
         >
-          Native
+          <input
+            class="photon-checkbox photon-checkbox-micro stackSettingsCheckbox"
+            type="checkbox"
+          />
+          <span
+            title="Sort by the time spent in a call node, ignoring its children."
+          >
+            Invert call stack
+          </span>
+        </label>
+        <label
+          class="photon-label photon-label-micro photon-label-horiz-padding"
+        >
+          <input
+            checked=""
+            class="photon-checkbox photon-checkbox-micro stackSettingsCheckbox"
+            type="checkbox"
+          />
+          <span
+            title="Uncheck to hide samples whose leaf frame is in the Idle category."
+          >
+            Include idle samples
+          </span>
         </label>
       </li>
     </ul>
@@ -473,7 +513,7 @@ exports[`FlameGraph matches the snapshot 1`] = `
           <input
             class="idleSearchFieldInput photon-input"
             name="search"
-            placeholder="Enter filter terms"
+            placeholder="Enter filter terms (/)"
             required=""
             title="Only display stacks which contain a function whose name matches this substring"
             type="search"
@@ -588,7 +628,7 @@ Array [
   ],
   Array [
     "set fillStyle",
-    "#000",
+    "#000000",
   ],
   Array [
     "fillText",
@@ -613,7 +653,7 @@ Array [
   ],
   Array [
     "set fillStyle",
-    "#000",
+    "#000000",
   ],
   Array [
     "fillText",
@@ -638,7 +678,7 @@ Array [
   ],
   Array [
     "set fillStyle",
-    "#000",
+    "#000000",
   ],
   Array [
     "fillText",
@@ -663,7 +703,7 @@ Array [
   ],
   Array [
     "set fillStyle",
-    "#000",
+    "#000000",
   ],
   Array [
     "fillText",
@@ -688,7 +728,7 @@ Array [
   ],
   Array [
     "set fillStyle",
-    "#000",
+    "#000000",
   ],
   Array [
     "fillText",
@@ -713,7 +753,7 @@ Array [
   ],
   Array [
     "set fillStyle",
-    "#000",
+    "#000000",
   ],
   Array [
     "fillText",
@@ -738,7 +778,7 @@ Array [
   ],
   Array [
     "set fillStyle",
-    "#000",
+    "#000000",
   ],
   Array [
     "fillText",
@@ -763,7 +803,7 @@ Array [
   ],
   Array [
     "set fillStyle",
-    "#000",
+    "#000000",
   ],
   Array [
     "fillText",
@@ -788,7 +828,7 @@ Array [
   ],
   Array [
     "set fillStyle",
-    "#000",
+    "#000000",
   ],
   Array [
     "fillText",
@@ -813,7 +853,7 @@ Array [
   ],
   Array [
     "set fillStyle",
-    "#000",
+    "#000000",
   ],
   Array [
     "fillText",

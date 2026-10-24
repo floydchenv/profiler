@@ -20,6 +20,9 @@ import {
   closeBottomBox,
   changeShowUserTimings,
   changeStackChartSameWidths,
+  changeIncludeIdleSamples,
+  changeSelectedMarker,
+  changeMarkerTableSort,
 } from '../actions/profile-view';
 import { changeSelectedTab, changeProfilesToCompare } from '../actions/app';
 import {
@@ -39,20 +42,31 @@ import type {
   State,
   ThreadIndex,
   IndexIntoSourceTable,
+  BottomBoxInfo,
 } from 'firefox-profiler/types';
+import { FuncFlag } from 'firefox-profiler/types';
 import getNiceProfile from './fixtures/profiles/call-nodes';
 import queryString from 'query-string';
 import {
   getHumanReadableTracks,
   getProfileWithNiceTracks,
 } from './fixtures/profiles/tracks';
-import { getProfileFromTextSamples } from './fixtures/profiles/processed-profile';
+import {
+  getProfileFromTextSamples,
+  getProfileWithMarkers,
+  getCounterForThread,
+  addTabInformationToProfile,
+} from './fixtures/profiles/processed-profile';
 import { selectedThreadSelectors } from '../selectors/per-thread';
 import {
   encodeUintArrayForUrlComponent,
   encodeUintSetForUrlComponent,
 } from '../utils/uintarray-encoding';
 import { getProfile } from '../selectors/profile';
+import {
+  getRawMarkerTableBuilderFromExisting,
+  finishRawMarkerTableBuilder,
+} from '../profile-logic/data-structures';
 import { SYMBOL_SERVER_URL } from '../app-logic/constants';
 import { getThreadsKey } from '../profile-logic/profile-data';
 import { StringTable } from 'firefox-profiler/utils/string-table';
@@ -486,6 +500,62 @@ describe('search strings', function () {
   });
 });
 
+describe('marker table sort', function () {
+  function _getStoreOnMarkerTable() {
+    const store = _getStoreWithURL();
+    store.dispatch(changeSelectedTab('marker-table'));
+    return store;
+  }
+
+  it('omits the default sort from the URL', function () {
+    const { getState } = _getStoreOnMarkerTable();
+    expect(getQueryStringFromState(getState())).not.toContain('markerSort');
+  });
+
+  it('serializes a non-default sort with primary first', function () {
+    const { getState, dispatch } = _getStoreOnMarkerTable();
+    // duration desc primary, name asc tiebreaker
+    dispatch(
+      changeMarkerTableSort([
+        { column: 'duration', ascending: false },
+        { column: 'name', ascending: true },
+      ])
+    );
+    expect(getQueryStringFromState(getState())).toContain(
+      'markerSort=duration-desc~name-asc'
+    );
+  });
+
+  it('round-trips a non-default sort through the URL', function () {
+    const { getState, dispatch } = _getStoreOnMarkerTable();
+    dispatch(changeMarkerTableSort([{ column: 'duration', ascending: false }]));
+    const url = urlFromState(getState().urlState);
+    const restored = stateFromLocation({
+      pathname: new URL(url, 'http://localhost').pathname,
+      search: new URL(url, 'http://localhost').search,
+      hash: '',
+    });
+    expect(restored.profileSpecific.markerTableSort).toEqual([
+      { column: 'duration', ascending: false },
+    ]);
+  });
+
+  it('falls back to the default when the URL has an invalid column', function () {
+    const { getState } = _getStoreWithURL({
+      pathname: '/public/abc/marker-table/',
+      search: '?markerSort=bogus-desc',
+    });
+    expect(getState().urlState.profileSpecific.markerTableSort).toBeNull();
+  });
+
+  it('omits the sort from the URL on the marker chart panel', function () {
+    const { getState, dispatch } = _getStoreWithURL();
+    dispatch(changeSelectedTab('marker-chart'));
+    dispatch(changeMarkerTableSort([{ column: 'duration', ascending: false }]));
+    expect(getQueryStringFromState(getState())).not.toContain('markerSort');
+  });
+});
+
 describe('profileName', function () {
   it('serializes the profileName in the URL', function () {
     const { getState, dispatch } = _getStoreWithURL();
@@ -847,9 +917,8 @@ describe('url upgrading', function () {
         G.js
       `);
 
-      profile.threads[0].funcTable.relevantForJS[
-        funcNamesDictPerThread.DrelevantForJs
-      ] = true;
+      profile.shared.funcTable.flags[funcNamesDictPerThread.DrelevantForJs] |=
+        FuncFlag.RelevantForJS;
 
       const callNodePathBefore = [
         funcNamesDictPerThread['B.js'],
@@ -899,9 +968,8 @@ describe('url upgrading', function () {
         E.js
       `);
 
-      profile.threads[0].funcTable.relevantForJS[
-        funcNamesDictPerThread.BrelevantForJs
-      ] = true;
+      profile.shared.funcTable.flags[funcNamesDictPerThread.BrelevantForJs] |=
+        FuncFlag.RelevantForJS;
 
       const callNodePathBefore = [
         funcNamesDictPerThread['C.js'],
@@ -950,9 +1018,8 @@ describe('url upgrading', function () {
         F.js
       `);
 
-      profile.threads[0].funcTable.relevantForJS[
-        funcNamesDictPerThread.BrelevantForJs
-      ] = true;
+      profile.shared.funcTable.flags[funcNamesDictPerThread.BrelevantForJs] |=
+        FuncFlag.RelevantForJS;
 
       const callNodePathBefore = [
         funcNamesDictPerThread['D.js'],
@@ -1000,9 +1067,8 @@ describe('url upgrading', function () {
         G.js            E.js
       `);
 
-      profile.threads[0].funcTable.relevantForJS[
-        funcNamesDictPerThread.CrelevantForJs
-      ] = true;
+      profile.shared.funcTable.flags[funcNamesDictPerThread.CrelevantForJs] |=
+        FuncFlag.RelevantForJS;
 
       const callNodePathBefore = [
         funcNamesDictPerThread['B.js'],
@@ -1050,9 +1116,8 @@ describe('url upgrading', function () {
         G.js            E.js
       `);
 
-      profile.threads[0].funcTable.relevantForJS[
-        funcNamesDictPerThread.BrelevantForJs
-      ] = true;
+      profile.shared.funcTable.flags[funcNamesDictPerThread.BrelevantForJs] |=
+        FuncFlag.RelevantForJS;
 
       const callNodePathBefore = [
         funcNamesDictPerThread['C.js'],
@@ -1229,14 +1294,19 @@ describe('url upgrading', function () {
       expect(query.timelineType).toBeFalsy();
     });
 
-    it('add an explicit category from the url', function () {
+    it('maps the implicit category type to cpu-category', function () {
+      // In v6, the default timeline type was 'category'. The v7 upgrader adds
+      // an explicit 'category' to the URL, which is then parsed as 'cpu-category'
+      // since the two are now equivalent.
       const { getState } = _getStoreWithURL({
         pathname: '/public/e71ce9584da34298627fb66ac7f2f245ba5edbf5/calltree/',
         search: '',
         v: 6,
       });
 
-      expect(urlStateSelectors.getTimelineType(getState())).toBe('category');
+      expect(urlStateSelectors.getTimelineType(getState())).toBe(
+        'cpu-category'
+      );
 
       const newUrl = new URL(
         urlFromState(urlStateSelectors.getUrlState(getState())),
@@ -1245,7 +1315,7 @@ describe('url upgrading', function () {
       const query = queryString.parse(newUrl.search.substr(1), {
         arrayFormat: 'bracket',
       });
-      expect(query.timelineType).toBe('category');
+      expect(query.timelineType).toBeFalsy();
     });
 
     it('keeps stack category the same', function () {
@@ -1265,6 +1335,146 @@ describe('url upgrading', function () {
         arrayFormat: 'bracket',
       });
       expect(query.timelineType).toBe('stack');
+    });
+  });
+
+  describe('version 16: collapse counter track types into a single counter type', function () {
+    // Build a profile whose pid '222' has one main thread with an IPC marker and
+    // three counters (Memory, power, Bandwidth). This exercises the v16 upgrader:
+    // under the pre-v16 LOCAL_TRACK_INDEX_ORDER the ipc track sat between
+    // 'memory' (slot 2) and 'power' (slot 6), which no longer holds now that all
+    // counters share slot 2.
+    function buildCounterProfile() {
+      const { profile } = getProfileFromTextSamples('A  B  C  D  E');
+      const mainThread = profile.threads[0];
+      mainThread.pid = '222';
+      mainThread.name = 'GeckoMain';
+      mainThread.isMainThread = true;
+      mainThread.processType = 'tab';
+
+      // Push a single IPC marker onto the main thread. The upgrader only
+      // checks markers.data[i].type === 'IPC', so a minimal payload is enough.
+      const stringTable = StringTable.withBackingArray(
+        profile.shared.stringArray
+      );
+      const mainThreadMarkers = getRawMarkerTableBuilderFromExisting(
+        mainThread.markers
+      );
+      mainThreadMarkers.name.push(stringTable.indexForString('IPC'));
+      mainThreadMarkers.phase.push(0);
+      mainThreadMarkers.startTime.push(0);
+      mainThreadMarkers.endTime.push(null);
+      mainThreadMarkers.category.push(0);
+      mainThreadMarkers.data.push({
+        type: 'IPC',
+        startTime: 0,
+        endTime: 1,
+        otherPid: '333',
+        messageSeqno: 1,
+        messageType: 'Foo',
+        side: 'parent',
+        direction: 'sending',
+        phase: 'endpoint',
+        sync: false,
+      } as any);
+      mainThreadMarkers.length++;
+      mainThread.markers = finishRawMarkerTableBuilder(mainThreadMarkers);
+
+      const memoryCounter = getCounterForThread(mainThread, 0);
+      memoryCounter.category = 'Memory';
+      memoryCounter.name = 'Memory';
+      const powerCounter = getCounterForThread(mainThread, 0);
+      powerCounter.category = 'power';
+      powerCounter.name = 'Power';
+      const bandwidthCounter = getCounterForThread(mainThread, 0);
+      bandwidthCounter.category = 'Bandwidth';
+      bandwidthCounter.name = 'Bandwidth';
+      profile.counters = [memoryCounter, powerCounter, bandwidthCounter];
+
+      return profile;
+    }
+
+    it('remaps localTrackOrderByPid when counter tracks change position', function () {
+      const profile = buildCounterProfile();
+
+      // Pre-v16 layout for pid '222' (sorted by old LOCAL_TRACK_INDEX_ORDER):
+      //   [0] memory    (slot 2)
+      //   [1] ipc       (slot 3)
+      //   [2] power     (slot 6)
+      //   [3] bandwidth (slot 8)
+      const oldOrder = [3, 2, 1, 0];
+
+      // Post-v16 layout: counters grouped at slot 2, ipc at slot 3.
+      //   [0] memory    (counter, insertion order)
+      //   [1] power     (counter)
+      //   [2] bandwidth (counter)
+      //   [3] ipc
+      const expectedNewOrder = [2, 1, 3, 0];
+
+      const { query } = upgradeLocationToCurrentVersion(
+        {
+          pathname: '',
+          hash: '',
+          query: {
+            v: '15',
+            localTrackOrderByPid:
+              '222-' + encodeUintArrayForUrlComponent(oldOrder),
+          },
+        },
+        profile
+      );
+
+      expect(query.localTrackOrderByPid).toBe(
+        '222-' + encodeUintArrayForUrlComponent(expectedNewOrder)
+      );
+    });
+
+    it('remaps hiddenLocalTracksByPid when counter tracks change position', function () {
+      const profile = buildCounterProfile();
+
+      // Hide the old 'ipc' (index 1) and old 'bandwidth' (index 3).
+      const oldHidden = new Set([1, 3]);
+      // In the new layout those tracks live at indexes 3 (ipc) and 2 (bandwidth).
+      const expectedNewHidden = new Set([3, 2]);
+
+      const { query } = upgradeLocationToCurrentVersion(
+        {
+          pathname: '',
+          hash: '',
+          query: {
+            v: '15',
+            hiddenLocalTracksByPid:
+              '222-' + encodeUintSetForUrlComponent(oldHidden),
+          },
+        },
+        profile
+      );
+
+      expect(query.hiddenLocalTracksByPid).toBe(
+        '222-' + encodeUintSetForUrlComponent(expectedNewHidden)
+      );
+    });
+
+    it('leaves unrelated PIDs untouched', function () {
+      const profile = buildCounterProfile();
+
+      // pid '999' isn't in the profile, so the upgrader has nothing to remap
+      // for it and should leave the segment as-is.
+      const untouched = '999-' + encodeUintArrayForUrlComponent([1, 0]);
+
+      const { query } = upgradeLocationToCurrentVersion(
+        {
+          pathname: '',
+          hash: '',
+          query: {
+            v: '15',
+            localTrackOrderByPid: untouched,
+          },
+        },
+        profile
+      );
+
+      expect(query.localTrackOrderByPid).toBe(untouched);
     });
   });
 
@@ -1654,6 +1864,28 @@ describe('stack chart specific queries', function () {
   });
 });
 
+describe('"include idle samples" query', function () {
+  it('defaults to true and is absent from the URL', function () {
+    const { getState } = _getStoreWithURL();
+    expect(urlStateSelectors.getIncludeIdleSamples(getState())).toBe(true);
+    expect(getQueryStringFromState(getState())).not.toContain(
+      'hideIdleSamples'
+    );
+  });
+
+  it('persists hideIdleSamples through a URL roundtrip when toggled off', function () {
+    const { getState, dispatch } = _getStoreWithURL();
+
+    dispatch(changeIncludeIdleSamples(false));
+    expect(getQueryStringFromState(getState())).toContain('hideIdleSamples');
+
+    const storeAfterReload = _getStoreFromStateAfterUrlRoundtrip(getState());
+    expect(
+      urlStateSelectors.getIncludeIdleSamples(storeAfterReload.getState())
+    ).toBe(false);
+  });
+});
+
 describe('symbolServerUrl', function () {
   function setup(search: string) {
     jest.spyOn(console, 'error').mockImplementation(() => {});
@@ -1797,10 +2029,12 @@ describe('URL persistence of bottom box (source view and assembly view)', functi
     const sourceFile =
       'hg:hg.mozilla.org/mozilla-central:xpcom/threads/nsThread.cpp:5bb3e281dc9ec8a619c781d52882adb1cacf20bb';
     const sourceIndex = getSourceIndex(sourceFile);
-    const bottomBoxInfo = {
-      libIndex: 0,
+    const bottomBoxInfo: BottomBoxInfo = {
       sourceIndex,
       nativeSymbols: [],
+      initialNativeSymbol: null,
+      highlightedLineNumber: null,
+      highlightedInstructionAddress: null,
     };
     dispatch(updateBottomBoxContentsAndMaybeOpen('calltree', bottomBoxInfo));
     const newStore = _getStoreFromStateAfterUrlRoundtrip(getState());
@@ -1829,10 +2063,12 @@ describe('URL persistence of bottom box (source view and assembly view)', functi
     const sourceFile =
       'hg:hg.mozilla.org/mozilla-central:xpcom/threads/nsThread.cpp:5bb3e281dc9ec8a619c781d52882adb1cacf20bb';
     const sourceIndex = getSourceIndex(sourceFile);
-    const bottomBoxInfo = {
-      libIndex: 0,
+    const bottomBoxInfo: BottomBoxInfo = {
       sourceIndex,
       nativeSymbols: [],
+      initialNativeSymbol: null,
+      highlightedLineNumber: null,
+      highlightedInstructionAddress: null,
     };
     dispatch(updateBottomBoxContentsAndMaybeOpen('calltree', bottomBoxInfo));
     dispatch(closeBottomBox());
@@ -1857,10 +2093,12 @@ describe('URL persistence of bottom box (source view and assembly view)', functi
       functionSize: 14,
       functionSizeIsKnown: false,
     };
-    const bottomBoxInfo = {
-      libIndex: 0,
+    const bottomBoxInfo: BottomBoxInfo = {
       sourceIndex: null,
       nativeSymbols: [nativeSymbolInfo],
+      initialNativeSymbol: 0,
+      highlightedLineNumber: null,
+      highlightedInstructionAddress: null,
     };
     dispatch(updateBottomBoxContentsAndMaybeOpen('calltree', bottomBoxInfo));
     const newStore = _getStoreFromStateAfterUrlRoundtrip(getState());
@@ -1899,10 +2137,12 @@ describe('URL persistence of bottom box (source view and assembly view)', functi
       functionSize: 14,
       functionSizeIsKnown: false,
     };
-    const bottomBoxInfo = {
-      libIndex: 0,
+    const bottomBoxInfo: BottomBoxInfo = {
       sourceIndex,
       nativeSymbols: [nativeSymbolInfo],
+      initialNativeSymbol: 0,
+      highlightedLineNumber: null,
+      highlightedInstructionAddress: null,
     };
     dispatch(updateBottomBoxContentsAndMaybeOpen('calltree', bottomBoxInfo));
     const newStore = _getStoreFromStateAfterUrlRoundtrip(getState());
@@ -1921,33 +2161,46 @@ describe('URL persistence of bottom box (source view and assembly view)', functi
 });
 
 describe('tab selector', function () {
-  function setup() {
-    const store = _getStoreWithURL();
-    return store;
+  function getProfileWithTabs() {
+    const profile = getProfileWithNiceTracks();
+    const {
+      firstTabTabID,
+      secondTabTabID,
+      parentInnerWindowIDsWithChildren,
+      secondTabInnerWindowIDs,
+    } = addTabInformationToProfile(profile);
+    // Thread 0 belongs to the first tab and thread 1 to the second tab.
+    profile.threads[0].usedInnerWindowIDs = [parentInnerWindowIDsWithChildren];
+    profile.threads[1].usedInnerWindowIDs = [secondTabInnerWindowIDs[0]];
+    return { profile, firstTabTabID, secondTabTabID };
+  }
+
+  function setup(search = '') {
+    const { profile, firstTabTabID, secondTabTabID } = getProfileWithTabs();
+    const store = _getStoreWithURL({ search }, profile);
+    return { ...store, firstTabTabID, secondTabTabID };
   }
 
   it('can serialize the tabFilter properly', function () {
-    const { dispatch, getState } = setup();
+    const { dispatch, getState, firstTabTabID, secondTabTabID } = setup();
 
     // Change the tab filter.
-    let tabID = 123;
-    dispatch(changeTabFilter(tabID));
+    dispatch(changeTabFilter(firstTabTabID));
 
     // Check if the state update happened properly.
-    expect(urlStateSelectors.getTabFilter(getState())).toBe(tabID);
+    expect(urlStateSelectors.getTabFilter(getState())).toBe(firstTabTabID);
     expect(urlStateSelectors.hasTabFilter(getState())).toBe(true);
 
     // Check if the URL update happened properly.
     let queryString = getQueryStringFromState(getState());
-    expect(queryString).toContain(`tabID=${tabID}`);
+    expect(queryString).toContain(`tabID=${firstTabTabID}`);
 
     // Change it again and check.
-    tabID = 321;
-    dispatch(changeTabFilter(tabID));
-    expect(urlStateSelectors.getTabFilter(getState())).toBe(tabID);
+    dispatch(changeTabFilter(secondTabTabID));
+    expect(urlStateSelectors.getTabFilter(getState())).toBe(secondTabTabID);
     expect(urlStateSelectors.hasTabFilter(getState())).toBe(true);
     queryString = getQueryStringFromState(getState());
-    expect(queryString).toContain(`tabID=${tabID}`);
+    expect(queryString).toContain(`tabID=${secondTabTabID}`);
   });
 
   it('null value does not appear in the url', function () {
@@ -1967,10 +2220,322 @@ describe('tab selector', function () {
   });
 
   it('can unserialize the tabFilter from URLs', () => {
-    const tabID = 123;
-    const { getState } = _getStoreWithURL({ search: `?tabID=${tabID}` });
+    const { secondTabTabID } = getProfileWithTabs();
+    const { getState } = setup(`?tabID=${secondTabTabID}`);
 
-    expect(urlStateSelectors.getTabFilter(getState())).toEqual(tabID);
+    expect(urlStateSelectors.getTabFilter(getState())).toEqual(secondTabTabID);
     expect(urlStateSelectors.hasTabFilter(getState())).toEqual(true);
+  });
+});
+
+describe('selectedMarker', function () {
+  function setup(search = '', pathname?: string) {
+    const profile = getProfileWithMarkers([
+      ['Marker A', 0, null],
+      ['Marker B', 1, null],
+      ['Marker C', 2, null],
+    ]);
+    const settings: StoreUrlSettings = { search };
+    if (pathname) {
+      settings.pathname = pathname;
+    }
+    return _getStoreWithURL(settings, profile);
+  }
+
+  it('can serialize a selected marker to the URL on marker-chart tab', () => {
+    const { dispatch, getState } = setup(
+      '?thread=0',
+      '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/marker-chart/'
+    );
+    const markerIndex = 1;
+    const threadsKey = getThreadsKey(new Set([0]));
+
+    dispatch(changeSelectedMarker(threadsKey, markerIndex));
+
+    const queryString = getQueryStringFromState(getState());
+    expect(queryString).toContain(`marker=${markerIndex}`);
+  });
+
+  it('can unserialize a selected marker from the URL on marker-chart tab', () => {
+    const markerIndex = 2;
+    const profile = getProfileWithMarkers([
+      ['Marker A', 0, null],
+      ['Marker B', 1, null],
+      ['Marker C', 2, null],
+    ]);
+    const { getState } = _getStoreWithURL(
+      {
+        pathname:
+          '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/marker-chart/',
+        search: `?thread=0&marker=${markerIndex}`,
+      },
+      profile
+    );
+
+    expect(selectedThreadSelectors.getSelectedMarkerIndex(getState())).toEqual(
+      markerIndex
+    );
+  });
+
+  it('handles marker index 0 correctly on marker-chart tab', () => {
+    const { dispatch, getState } = setup(
+      '?thread=0',
+      '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/marker-chart/'
+    );
+    const markerIndex = 0;
+    const threadsKey = getThreadsKey(new Set([0]));
+
+    dispatch(changeSelectedMarker(threadsKey, markerIndex));
+
+    const queryString = getQueryStringFromState(getState());
+    expect(queryString).toContain(`marker=${markerIndex}`);
+    expect(queryString).not.toContain('marker=undefined');
+  });
+
+  it('does not include marker in URL when switching to a thread without a selected marker on marker-chart tab', () => {
+    const { dispatch, getState } = setup(
+      '?thread=0',
+      '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/marker-chart/'
+    );
+    const markerIndex = 1;
+    const threadsKey0 = getThreadsKey(new Set([0]));
+
+    // Select a marker on thread 0
+    dispatch(changeSelectedMarker(threadsKey0, markerIndex));
+    expect(getQueryStringFromState(getState())).toContain(
+      `marker=${markerIndex}`
+    );
+
+    // Switch to thread 1 (no marker selected)
+    dispatch(changeSelectedThreads(new Set([1])));
+
+    const queryString = getQueryStringFromState(getState());
+    expect(queryString).not.toContain('marker=');
+  });
+
+  it('preserves selected marker in internal state when switching back to the thread on marker-chart tab', () => {
+    const { dispatch, getState } = setup(
+      '?thread=0',
+      '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/marker-chart/'
+    );
+    const markerIndex = 1;
+    const threadsKey0 = getThreadsKey(new Set([0]));
+
+    // Select a marker on thread 0
+    dispatch(changeSelectedMarker(threadsKey0, markerIndex));
+
+    // Switch to thread 1
+    dispatch(changeSelectedThreads(new Set([1])));
+
+    // Marker should not be in URL for thread 1
+    expect(getQueryStringFromState(getState())).not.toContain('marker=');
+
+    // Switch back to thread 0
+    dispatch(changeSelectedThreads(new Set([0])));
+
+    // The marker should reappear in the URL
+    const queryString = getQueryStringFromState(getState());
+    expect(queryString).toContain(`marker=${markerIndex}`);
+  });
+
+  it('handles null marker index correctly on marker-chart tab', () => {
+    const { dispatch, getState } = setup(
+      '?thread=0',
+      '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/marker-chart/'
+    );
+    const threadsKey = getThreadsKey(new Set([0]));
+
+    // Select a marker first
+    dispatch(changeSelectedMarker(threadsKey, 1));
+    expect(getQueryStringFromState(getState())).toContain('marker=1');
+
+    // Deselect the marker
+    dispatch(changeSelectedMarker(threadsKey, null));
+
+    const queryString = getQueryStringFromState(getState());
+    expect(queryString).not.toContain('marker=');
+  });
+
+  it('survives a URL round-trip on marker-chart tab', () => {
+    const profile = getProfileWithMarkers([
+      ['Marker A', 0, null],
+      ['Marker B', 1, null],
+      ['Marker C', 2, null],
+    ]);
+    const { dispatch, getState } = setup(
+      '?thread=0',
+      '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/marker-chart/'
+    );
+    const markerIndex = 2;
+    const threadsKey = getThreadsKey(new Set([0]));
+
+    dispatch(changeSelectedMarker(threadsKey, markerIndex));
+
+    // Get the URL
+    const urlState = urlStateSelectors.getUrlState(getState());
+    const url = urlFromState(urlState);
+
+    // URL should contain the marker
+    expect(url).toContain(`marker=${markerIndex}`);
+
+    // Load a fresh store from the URL and verify via selector
+    const { getState: getState2 } = _getStoreWithURL(
+      {
+        pathname:
+          '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/marker-chart/',
+        search: new URL(url, 'https://profiler.firefox.com').search,
+      },
+      profile
+    );
+    expect(selectedThreadSelectors.getSelectedMarkerIndex(getState2())).toEqual(
+      markerIndex
+    );
+  });
+
+  it('does NOT include marker in URL on calltree tab', () => {
+    const { dispatch, getState } = setup(
+      '?thread=0',
+      '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/calltree/'
+    );
+    const markerIndex = 1;
+    const threadsKey = getThreadsKey(new Set([0]));
+
+    // Force tab to calltree since viewProfile auto-switches to marker-chart for profiles without samples
+    dispatch({ type: 'CHANGE_SELECTED_TAB', selectedTab: 'calltree' });
+
+    // Select a marker on calltree tab
+    dispatch(changeSelectedMarker(threadsKey, markerIndex));
+
+    // Marker should NOT be in URL for calltree tab
+    const queryString = getQueryStringFromState(getState());
+    expect(queryString).not.toContain('marker=');
+  });
+
+  it('does NOT include marker in URL on flame-graph tab', () => {
+    const { dispatch, getState } = setup(
+      '?thread=0',
+      '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/flame-graph/'
+    );
+    const markerIndex = 1;
+    const threadsKey = getThreadsKey(new Set([0]));
+
+    // Force tab to flame-graph since viewProfile auto-switches to marker-chart for profiles without samples
+    dispatch({ type: 'CHANGE_SELECTED_TAB', selectedTab: 'flame-graph' });
+
+    // Select a marker on flame-graph tab
+    dispatch(changeSelectedMarker(threadsKey, markerIndex));
+
+    // Marker should NOT be in URL for flame-graph tab
+    const queryString = getQueryStringFromState(getState());
+    expect(queryString).not.toContain('marker=');
+  });
+
+  it('includes marker in URL on marker-table tab', () => {
+    const { dispatch, getState } = setup(
+      '?thread=0',
+      '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/marker-table/'
+    );
+    const markerIndex = 1;
+    const threadsKey = getThreadsKey(new Set([0]));
+
+    // Select a marker on marker-table tab
+    dispatch(changeSelectedMarker(threadsKey, markerIndex));
+
+    // Marker SHOULD be in URL for marker-table tab
+    const queryString = getQueryStringFromState(getState());
+    expect(queryString).toContain(`marker=${markerIndex}`);
+  });
+
+  it('removes marker from URL when switching from marker-chart to calltree', () => {
+    const { dispatch, getState } = setup(
+      '?thread=0',
+      '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/marker-chart/'
+    );
+    const markerIndex = 1;
+    const threadsKey = getThreadsKey(new Set([0]));
+
+    // Select a marker on marker-chart
+    dispatch(changeSelectedMarker(threadsKey, markerIndex));
+    expect(getQueryStringFromState(getState())).toContain(
+      `marker=${markerIndex}`
+    );
+
+    // Switch to calltree tab
+    dispatch({ type: 'CHANGE_SELECTED_TAB', selectedTab: 'calltree' });
+
+    // Marker should be removed from URL
+    const queryString = getQueryStringFromState(getState());
+    expect(queryString).not.toContain('marker=');
+  });
+
+  it('adds marker to URL when switching from calltree to marker-chart', () => {
+    const { dispatch, getState } = setup(
+      '?thread=0',
+      '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/calltree/'
+    );
+    const markerIndex = 1;
+    const threadsKey = getThreadsKey(new Set([0]));
+
+    // Force tab to calltree since viewProfile auto-switches to marker-chart for profiles without samples
+    dispatch({ type: 'CHANGE_SELECTED_TAB', selectedTab: 'calltree' });
+
+    // Select a marker on calltree (won't be in URL)
+    dispatch(changeSelectedMarker(threadsKey, markerIndex));
+    expect(getQueryStringFromState(getState())).not.toContain('marker=');
+
+    // Switch to marker-chart tab
+    dispatch({ type: 'CHANGE_SELECTED_TAB', selectedTab: 'marker-chart' });
+
+    // Marker should now appear in URL
+    const queryString = getQueryStringFromState(getState());
+    expect(queryString).toContain(`marker=${markerIndex}`);
+  });
+
+  it('syncs selected marker when URL state changes (browser back/forward)', () => {
+    const { dispatch, getState } = setup(
+      '?thread=0',
+      '/public/1ecd7a421948995171a4bb483b7bcc8e1868cc57/marker-chart/'
+    );
+    const threadsKey = getThreadsKey(new Set([0]));
+
+    // Select marker 1
+    dispatch(changeSelectedMarker(threadsKey, 1));
+    expect(selectedThreadSelectors.getSelectedMarkerIndex(getState())).toEqual(
+      1
+    );
+
+    // Simulate browser navigation by dispatching UPDATE_URL_STATE
+    // with a different selected marker (as if we navigated back)
+    const currentUrlState = urlStateSelectors.getUrlState(getState());
+    const newUrlState = {
+      ...currentUrlState,
+      profileSpecific: {
+        ...currentUrlState.profileSpecific,
+        selectedMarkers: {
+          [threadsKey]: 2, // Different marker
+        },
+      },
+    };
+    dispatch({ type: 'UPDATE_URL_STATE', newUrlState });
+
+    expect(selectedThreadSelectors.getSelectedMarkerIndex(getState())).toEqual(
+      2
+    );
+
+    // Now simulate navigating to a state with no selected marker
+    const urlStateWithNoMarker = {
+      ...currentUrlState,
+      profileSpecific: {
+        ...currentUrlState.profileSpecific,
+        selectedMarkers: {
+          [threadsKey]: null,
+        },
+      },
+    };
+    dispatch({ type: 'UPDATE_URL_STATE', newUrlState: urlStateWithNoMarker });
+
+    expect(selectedThreadSelectors.getSelectedMarkerIndex(getState())).toEqual(
+      null
+    );
   });
 });

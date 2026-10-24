@@ -2,17 +2,20 @@
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 
+import * as React from 'react';
 import { Provider } from 'react-redux';
 import { fireEvent } from '@testing-library/react';
 
 import { render, act } from 'firefox-profiler/test/fixtures/testing-library';
-import { withChartViewport } from '../../components/shared/chart/Viewport';
+import {
+  withChartViewport,
+  type Viewport,
+} from '../../components/shared/chart/Viewport';
+import { ChartCanvas } from '../..//components/shared/chart/Canvas';
 import {
   getCommittedRange,
   getPreviewSelection,
 } from '../../selectors/profile';
-
-import { changeSidebarOpenState } from '../../actions/app';
 
 import explicitConnect from '../../utils/connect';
 import { ensureExists } from '../../utils/types';
@@ -22,11 +25,13 @@ import {
   autoMockElementSize,
   setMockedElementSize,
 } from '../fixtures/mocks/element-size';
+import { triggerResizeObservers } from '../fixtures/mocks/resize-observer';
 import { mockRaf } from '../fixtures/mocks/request-animation-frame';
 import { storeWithProfile } from '../fixtures/stores';
 import { getProfileFromTextSamples } from '../fixtures/profiles/processed-profile';
 
 import type {
+  MarkerIndex,
   Milliseconds,
   MixedObject,
   PreviewSelection,
@@ -583,8 +588,8 @@ describe('Viewport', function () {
     });
   });
 
-  it('reacts to changes to the panel layout generation', function () {
-    const { dispatch, getChartViewport, flushRafCalls } = setup();
+  it('reacts to container size changes', function () {
+    const { getChartViewport } = setup();
 
     expect(getChartViewport()).toMatchObject({
       containerWidth: BOUNDING_BOX_WIDTH,
@@ -600,10 +605,7 @@ describe('Viewport', function () {
       ...INITIAL_ELEMENT_SIZE,
       width: BOUNDING_BOX_WIDTH - boundingWidthDiff,
     });
-    act(() => {
-      dispatch(changeSidebarOpenState('calltree', true));
-    });
-    flushRafCalls();
+    triggerResizeObservers();
 
     expect(getChartViewport()).toMatchObject({
       containerWidth: BOUNDING_BOX_WIDTH - boundingWidthDiff,
@@ -613,6 +615,24 @@ describe('Viewport', function () {
       viewportTop: 0,
       viewportBottom: BOUNDING_BOX_HEIGHT,
     });
+  });
+
+  it('does not change the canvas size unnecessarily', () => {
+    const { container, performRerender, flushRafCalls } =
+      setupWithSimpleCanvas();
+
+    const canvas = container.querySelector('canvas');
+    expect(canvas!.width).toBe(BOUNDING_BOX_WIDTH);
+
+    // Just re-rendering shouldn't change it.
+    performRerender();
+    expect(canvas!.width).toBe(BOUNDING_BOX_WIDTH);
+
+    // The size re-calculation done by Viewport happens asynchronously,
+    // with containerWidth temporary being 0.
+    // This shouldn't change the canvas size.
+    flushRafCalls();
+    expect(canvas!.width).toBe(BOUNDING_BOX_WIDTH);
   });
 });
 
@@ -661,11 +681,9 @@ function setup(profileOverrides: MixedObject = {}) {
           maximumZoom: MAXIMUM_ZOOM,
           ...profileOverrides,
         }}
-        chartProps={
-          {
-            // None used in dummy component.
-          }
-        }
+        chartProps={{
+          // None used in dummy component.
+        }}
       />
     ),
   });
@@ -756,6 +774,121 @@ function setup(profileOverrides: MixedObject = {}) {
     scroll,
     depressKey,
     clickAndDrag,
+    dispatch: store.dispatch,
+  };
+}
+
+// A variant with simple ChartCanvas wrapper, used for testing the
+// viewportNeedsUpdate handling.
+function setupWithSimpleCanvas() {
+  const realFlushRafCalls = mockRaf();
+  const flushRafCalls = (options?: { timestamps: number[]; once?: boolean }) =>
+    act(() => realFlushRafCalls(options));
+
+  type SimpleCanvasOwnProps = {};
+  type SimpleCanvasProps = SimpleCanvasOwnProps & {
+    readonly viewport: Viewport;
+  };
+
+  class SimpleChartCanvasImpl extends React.PureComponent<SimpleCanvasProps> {
+    _onDoubleClickMarker = () => {};
+    _getHoveredMarkerInfo = (): React.ReactNode => {
+      return null;
+    };
+    _drawCanvas = () => {};
+    _hitTest = (): MarkerIndex | null => {
+      return null;
+    };
+    override render() {
+      const { containerWidth, containerHeight, isDragging } =
+        this.props.viewport;
+
+      return (
+        <ChartCanvas
+          className="markerChartCanvas"
+          containerWidth={containerWidth}
+          containerHeight={containerHeight}
+          isDragging={isDragging}
+          scaleCtxToCssPixels={true}
+          onDoubleClickItem={this._onDoubleClickMarker}
+          getHoveredItemInfo={this._getHoveredMarkerInfo}
+          drawCanvas={this._drawCanvas}
+          hitTest={this._hitTest}
+        />
+      );
+    }
+  }
+
+  const ChartWithViewport = withChartViewport<SimpleCanvasOwnProps>(
+    SimpleChartCanvasImpl
+  );
+
+  type OwnProps = {
+    charGeneration: number;
+  };
+
+  type StateProps = {
+    previewSelection: PreviewSelection | null;
+    timeRange: StartEndRange;
+  };
+
+  type Props = OwnProps & StateProps;
+
+  let charGeneration = 0;
+
+  // The viewport component started out as an unconnected component, but then it
+  // started subscribing to the store an dispatching its own actions. This migration
+  // wasn't completely done, so it still has a few pieces of state passed in through
+  // its OwnProps. In order to ensure that the component is consistent, make it
+  // a connected component.
+  const ConnectedChartWithViewport = explicitConnect<OwnProps, StateProps, {}>({
+    mapStateToProps: (state: State) => ({
+      timeRange: getCommittedRange(state),
+      previewSelection: getPreviewSelection(state),
+    }),
+    mapDispatchToProps: {},
+    component: (props: Props) => (
+      <ChartWithViewport
+        viewportProps={{
+          previewSelection: props.previewSelection,
+          timeRange: props.timeRange,
+          maxViewportHeight: MAX_VIEWPORT_HEIGHT,
+          startsAtBottom: false,
+          viewportNeedsUpdate: () => true,
+          marginLeft: 0,
+          marginRight: 0,
+          maximumZoom: MAXIMUM_ZOOM,
+        }}
+        chartProps={{}}
+      />
+    ),
+  });
+
+  const store = storeWithProfile(getProfileFromTextSamples('A').profile);
+
+  const renderResult = render(
+    <Provider store={store}>
+      <ConnectedChartWithViewport charGeneration={charGeneration} />
+    </Provider>
+  );
+  const { rerender } = renderResult;
+
+  const performRerender = () => {
+    charGeneration++;
+    rerender(
+      <Provider store={store}>
+        <ConnectedChartWithViewport charGeneration={charGeneration} />
+      </Provider>
+    );
+  };
+
+  // WithSize uses requestAnimationFrame.
+  flushRafCalls();
+
+  return {
+    ...renderResult,
+    performRerender,
+    flushRafCalls,
     dispatch: store.dispatch,
   };
 }

@@ -18,6 +18,7 @@ import {
   ensureExists,
   getFirstItemFromSet,
 } from '../../utils/types';
+import { base64StringToBytes } from '../../utils/base64';
 
 import type {
   Thread,
@@ -26,8 +27,9 @@ import type {
   JsTracerTable,
   RawSamplesTable,
   SamplesTable,
-  StackTable,
+  RawNativeAllocationsTable,
   NativeAllocationsTable,
+  RawJsAllocationsTable,
   JsAllocationsTable,
   SamplesLikeTable,
   Selector,
@@ -39,17 +41,38 @@ import type {
   EventDelayInfo,
   ThreadsKey,
   CallTreeSummaryStrategy,
-  ThreadWithReservedFunctions,
-  IndexIntoResourceTable,
-  IndexIntoFuncTable,
   State,
+  ImplementationFilter,
+  SampleCategoriesAndSubcategories,
+  IndexIntoSamplesTable,
 } from 'firefox-profiler/types';
 
 import type { TransformLabeL10nIds } from 'firefox-profiler/profile-logic/transforms';
+import type { BitSet } from 'firefox-profiler/utils/bitset';
 import type { MarkerSelectorsPerThread } from './markers';
 
 import { mergeThreads } from '../../profile-logic/merge-compare';
 import { defaultThreadViewOptions } from '../../reducers/profile-view';
+import type { SliceTree } from '../../utils/slice-tree';
+import { getSlices } from '../../utils/slice-tree';
+
+// Memoize some of these functions globally, so that in the common case we only
+// need to do these computations once globally instead of per thread. These
+// computations are based on the tables inside the filtered thread, so
+// unless there's per-thread transforms, those tables will be the same instance
+// from the profile shared data, and the memoization will hit the cache.
+const globallyMemoizedComputeTransformOutputForImplementationFilter = memoize(
+  ProfileData.computeTransformOutputForImplementationFilter,
+  {
+    limit: 2,
+  }
+);
+const globallyMemoizedComputeSearchStringFilterOutput = memoize(
+  ProfileData.computeSearchStringFilterOutput,
+  {
+    limit: 2,
+  }
+);
 
 /**
  * Infer the return type from the getBasicThreadSelectorsPerThread and
@@ -92,19 +115,55 @@ export function getBasicThreadSelectorsPerThread(
       ? ProfileSelectors.getProfile(state).threads[singleThreadIndex]
       : getMergedRawThread(state);
 
+  const getTracedValuesBuffer: Selector<ArrayBuffer | undefined> =
+    createSelector(
+      (state: State) => getRawThread(state).tracedValuesBuffer,
+      (tracedValuesBuffer: string | undefined) =>
+        tracedValuesBuffer ? base64StringToBytes(tracedValuesBuffer) : undefined
+    );
   const getRawSamplesTable: Selector<RawSamplesTable> = (state) =>
     getRawThread(state).samples;
   const getSamplesTable: Selector<SamplesTable> = createSelector(
     getRawSamplesTable,
+    ProfileSelectors.getStackTable,
     ProfileSelectors.getSampleUnits,
     ProfileSelectors.getReferenceCPUDeltaPerMs,
+    ProfileSelectors.getDefaultCategory,
     ProfileData.computeSamplesTableFromRawSamplesTable
   );
-  const getNativeAllocations: Selector<NativeAllocationsTable | void> = (
+  const getActivitySlices: Selector<SliceTree | null> = createSelector(
+    getSamplesTable,
+    (samples) =>
+      samples.hasCPUDeltas
+        ? getSlices(
+            [0.05, 0.2, 0.4, 0.6, 0.8],
+            Float64Array.from(
+              samples.threadCPUPercent.subarray(0, samples.length),
+              (v) => v / 100
+            ),
+            samples.time
+          )
+        : null
+  );
+  const getRawNativeAllocations: Selector<RawNativeAllocationsTable | void> = (
     state
   ) => getRawThread(state).nativeAllocations;
-  const getJsAllocations: Selector<JsAllocationsTable | void> = (state) =>
+  const getRawJsAllocations: Selector<RawJsAllocationsTable | void> = (state) =>
     getRawThread(state).jsAllocations;
+  const getNativeAllocations: Selector<NativeAllocationsTable | undefined> =
+    createSelector(getRawNativeAllocations, (raw) =>
+      raw
+        ? ProfileData.computeNativeAllocationsTableFromRawNativeAllocationsTable(
+            raw
+          )
+        : undefined
+    );
+  const getJsAllocations: Selector<JsAllocationsTable | undefined> =
+    createSelector(getRawJsAllocations, (raw) =>
+      raw
+        ? ProfileData.computeJsAllocationsTableFromRawJsAllocationsTable(raw)
+        : undefined
+    );
   const getThreadRange: Selector<StartEndRange> = (state) =>
     // This function is already memoized in profile-data.js, so we don't need to
     // memoize it here with `createSelector`.
@@ -112,12 +171,6 @@ export function getBasicThreadSelectorsPerThread(
       getRawThread(state),
       ProfileSelectors.getProfileInterval(state)
     );
-  const getStackTable: Selector<StackTable> = createSelector(
-    (state: State) => getRawThread(state).stackTable,
-    (state: State) => getRawThread(state).frameTable,
-    ProfileSelectors.getDefaultCategory,
-    ProfileData.computeStackTableFromRawStackTable
-  );
 
   /**
    * This selector gets the weight type from the thread.samples table, but
@@ -136,39 +189,58 @@ export function getBasicThreadSelectorsPerThread(
    * 3. Reserved functions - New funcTable with reserved functions for collapsed resources.
    * 4. Range - New samples table with only samples in the committed range.
    * 5. Transform - Apply the transform stack that modifies the stacks and samples.
-   * 6. Implementation - Modify stacks and samples to only show a single implementation.
-   * 7. Search - Exclude samples that don't include some text in the stack.
-   * 8. Preview - Only include samples that are within a user's preview range selection.
+   * 6. Idle - Optionally null out the stack of samples whose leaf frame is idle.
+   * 7. Implementation - Modify stacks and samples to only show a single implementation.
+   * 8. Search - Exclude samples that don't include some text in the stack.
+   * 9. Preview - Only include samples that are within a user's preview range selection.
    */
 
   const getThread: Selector<Thread> = createSelector(
     getRawThread,
     getSamplesTable,
-    getStackTable,
+    ProfileSelectors.getStackTable,
+    ProfileSelectors.getFrameTable,
+    ProfileSelectors.getFunctionsReservedFuncTable,
+    ProfileSelectors.getNativeSymbolTable,
+    (state: State) =>
+      ProfileSelectors.getRawProfileSharedData(state).resourceTable,
     ProfileSelectors.getStringTable,
     ProfileSelectors.getSourceTable,
+    getTracedValuesBuffer,
+    (state: State) =>
+      ProfileSelectors.getRawProfileSharedData(state).sourceLocationTable,
+    getJsAllocations,
+    getNativeAllocations,
     ProfileData.createThreadFromDerivedTables
   );
 
-  const getThreadWithReservedFunctions: Selector<ThreadWithReservedFunctions> =
-    createSelector(getThread, ProfileData.reserveFunctionsInThread);
-
-  const getFunctionsReservedThread: Selector<Thread> = (state) =>
-    getThreadWithReservedFunctions(state).thread;
-
-  const getReservedFunctionsForResources: Selector<
-    Map<IndexIntoResourceTable, IndexIntoFuncTable>
-  > = (state) =>
-    getThreadWithReservedFunctions(state).reservedFunctionsForResources;
-
   const getRangeFilteredThread: Selector<Thread> = createSelector(
-    getFunctionsReservedThread,
+    getThread,
     ProfileSelectors.getCommittedRange,
     (thread, range) => {
       const { start, end } = range;
       return ProfileData.filterThreadSamplesToRange(thread, start, end);
     }
   );
+
+  /**
+   * Get activity slices for the range-filtered thread (respecting zoom).
+   * This shows CPU activity only for the samples within the committed range.
+   */
+  const getRangeFilteredActivitySlices: Selector<SliceTree | null> =
+    createSelector(getRangeFilteredThread, (thread) => {
+      const samples = thread.samples;
+      return samples.hasCPUDeltas
+        ? getSlices(
+            [0.05, 0.2, 0.4, 0.6, 0.8],
+            Float64Array.from(
+              samples.threadCPUPercent.subarray(0, samples.length),
+              (v) => v / 100
+            ),
+            samples.time
+          )
+        : null;
+    });
 
   /**
    * The CallTreeSummaryStrategy determines how the call tree summarizes the
@@ -230,20 +302,25 @@ export function getBasicThreadSelectorsPerThread(
     CallTree.extractUnfilteredSamplesLikeTable
   );
 
+  const getUnfilteredCtssSampleCategoriesAndSubcategories: Selector<SampleCategoriesAndSubcategories> =
+    createSelector(
+      getThread,
+      getUnfilteredCtssSamples,
+      ProfileSelectors.getDefaultCategory,
+      CallTree.computeUnfilteredCtssSampleCategoriesAndSubcategories
+    );
+
   /**
    * This selector returns the offset to add to a sampleIndex when accessing the
    * unfiltered ctss samples based on an index into the filtered ctss samples.
    */
-  const getFilteredCtssSampleIndexOffset: Selector<number> = createSelector(
+  const getFilteredCtssSampleIndexOffsets: Selector<
+    [IndexIntoSamplesTable, IndexIntoSamplesTable]
+  > = createSelector(
     getUnfilteredCtssSamples,
     ProfileSelectors.getCommittedRange,
     (samples, { start, end }) => {
-      const [beginSampleIndex] = ProfileData.getSampleIndexRangeForSelection(
-        samples,
-        start,
-        end
-      );
-      return beginSampleIndex;
+      return ProfileData.getSampleIndexRangeForSelection(samples, start, end);
     }
   );
 
@@ -251,7 +328,7 @@ export function getBasicThreadSelectorsPerThread(
    * This selector returns the offset to add to sampleIndex when accessing
    * unfilteredThread.samples based on an index into filteredThread.samples.
    *
-   * In contrast to getFilteredCtssSampleIndexOffset, this function does not
+   * In contrast to getFilteredCtssSampleIndexOffsets, this function does not
    * depend on the call tree summary strategy and always uses the timing-based
    * samples.
    */
@@ -286,26 +363,22 @@ export function getBasicThreadSelectorsPerThread(
 
   const getHasUsefulTimingSamples: Selector<boolean> = createSelector(
     getSamplesTable,
-    getRawThread,
     ProfileSelectors.getRawProfileSharedData,
-    (samples, rawThread, shared) =>
-      ProfileData.hasUsefulSamples(samples.stack, rawThread, shared)
+    (samples, shared) => ProfileData.hasUsefulSamples(samples.stack, shared)
   );
 
   const getHasUsefulJsAllocations: Selector<boolean> = createSelector(
     getJsAllocations,
-    getRawThread,
     ProfileSelectors.getRawProfileSharedData,
-    (jsAllocations, rawThread, shared) =>
-      ProfileData.hasUsefulSamples(jsAllocations?.stack, rawThread, shared)
+    (jsAllocations, shared) =>
+      ProfileData.hasUsefulSamples(jsAllocations?.stack, shared)
   );
 
   const getHasUsefulNativeAllocations: Selector<boolean> = createSelector(
     getNativeAllocations,
-    getRawThread,
     ProfileSelectors.getRawProfileSharedData,
-    (nativeAllocations, rawThread, shared) =>
-      ProfileData.hasUsefulSamples(nativeAllocations?.stack, rawThread, shared)
+    (nativeAllocations, shared) =>
+      ProfileData.hasUsefulSamples(nativeAllocations?.stack, shared)
   );
 
   /**
@@ -320,6 +393,44 @@ export function getBasicThreadSelectorsPerThread(
     }
     return 'memoryAddress' in nativeAllocations;
   };
+
+  /**
+   * Retained memory and deallocated memory need to pair each deallocation with its
+   * allocation, which is only possible when the allocations carry memory addresses.
+   */
+  const getAvailableCallTreeSummaryStrategies: Selector<
+    CallTreeSummaryStrategy[]
+  > = createSelector(
+    getHasUsefulTimingSamples,
+    getHasUsefulJsAllocations,
+    getHasUsefulNativeAllocations,
+    getCanShowRetainedMemory,
+    (
+      hasUsefulTimingSamples,
+      hasUsefulJsAllocations,
+      hasUsefulNativeAllocations,
+      canShowRetainedMemory
+    ) =>
+      ProfileData.CALL_TREE_SUMMARY_STRATEGIES.filter((strategy) => {
+        switch (strategy) {
+          case 'timing':
+            return hasUsefulTimingSamples;
+          case 'js-allocations':
+            return hasUsefulJsAllocations;
+          case 'native-allocations':
+          case 'native-deallocations-sites':
+            return hasUsefulNativeAllocations;
+          case 'native-retained-allocations':
+          case 'native-deallocations-memory':
+            return canShowRetainedMemory;
+          default:
+            throw assertExhaustiveCheck(
+              strategy,
+              'Unhandled call tree summary strategy.'
+            );
+        }
+      })
+  );
 
   /**
    * The JS tracer selectors are placed in the thread selectors since there are
@@ -337,18 +448,11 @@ export function getBasicThreadSelectorsPerThread(
   const getExpensiveJsTracerTiming: Selector<JsTracerTiming[] | null> =
     createSelector(
       getJsTracerTable,
-      getRawThread,
-      ProfileSelectors.getStringTable,
-      ProfileSelectors.getSourceTable,
-      (jsTracerTable, thread, stringTable, sources) =>
+      ProfileSelectors.getRawProfileSharedData,
+      (jsTracerTable, shared) =>
         jsTracerTable === null
           ? null
-          : JsTracer.getJsTracerTiming(
-              jsTracerTable,
-              thread,
-              stringTable,
-              sources
-            )
+          : JsTracer.getJsTracerTiming(jsTracerTable, shared)
     );
 
   /**
@@ -386,14 +490,17 @@ export function getBasicThreadSelectorsPerThread(
     getRawThread,
     getThread,
     getSamplesTable,
+    getTracedValuesBuffer,
+    getActivitySlices,
+    getRangeFilteredActivitySlices,
     getSamplesWeightType,
     getNativeAllocations,
     getJsAllocations,
     getThreadRange,
-    getReservedFunctionsForResources,
     getRangeFilteredThread,
     getUnfilteredCtssSamples,
-    getFilteredCtssSampleIndexOffset,
+    getUnfilteredCtssSampleCategoriesAndSubcategories,
+    getFilteredCtssSampleIndexOffsets,
     getFilteredSampleIndexOffset,
     getFriendlyThreadName,
     getThreadProcessDetails,
@@ -405,7 +512,7 @@ export function getBasicThreadSelectorsPerThread(
     getHasUsefulJsAllocations,
     getHasUsefulNativeAllocations,
     getCanShowRetainedMemory,
-    getFunctionsReservedThread,
+    getAvailableCallTreeSummaryStrategies,
     getProcessedEventDelays,
     getCallTreeSummaryStrategy,
   };
@@ -432,7 +539,6 @@ export function getThreadSelectorsWithMarkersPerThread(
   const getRangeAndTransformFilteredThread: Selector<Thread> = createSelector(
     threadSelectors.getRangeFilteredThread,
     getTransformStack,
-    ProfileSelectors.getDefaultCategory,
     threadSelectors.getMarkerGetter,
     threadSelectors.getFullMarkerListIndexes,
     ProfileSelectors.getMarkerSchemaByName,
@@ -440,7 +546,6 @@ export function getThreadSelectorsWithMarkersPerThread(
     (
       startingThread,
       transforms,
-      defaultCategory,
       markerGetter,
       markerIndexes,
       markerSchemaByName,
@@ -452,7 +557,6 @@ export function getThreadSelectorsWithMarkersPerThread(
           _applyTransformMemoized(
             thread,
             transform,
-            defaultCategory,
             markerGetter,
             markerIndexes,
             markerSchemaByName,
@@ -463,18 +567,73 @@ export function getThreadSelectorsWithMarkersPerThread(
     }
   );
 
-  const _getImplementationFilteredThread: Selector<Thread> = createSelector(
+  const _getIdleFilteredThread: Selector<Thread> = createSelector(
     getRangeAndTransformFilteredThread,
-    UrlState.getImplementationFilter,
-    ProfileData.filterThreadByImplementation
+    UrlState.getIncludeIdleSamples,
+    ProfileSelectors.getIdleCategoryIndex,
+    (thread, includeIdleSamples, idleCategoryIndex) => {
+      if (includeIdleSamples || idleCategoryIndex === null) {
+        return thread;
+      }
+      return ProfileData.filterThreadSamplesByLeafCategory(
+        thread,
+        idleCategoryIndex
+      );
+    }
   );
+
+  const _getImplementationFilteredThread: Selector<Thread> = createSelector(
+    _getIdleFilteredThread,
+    UrlState.getImplementationFilter,
+    (thread: Thread, implementationFilter: ImplementationFilter) => {
+      // Apply the implementation filter.
+      const transformOutput =
+        globallyMemoizedComputeTransformOutputForImplementationFilter(
+          thread.stackTable,
+          thread.frameTable,
+          thread.funcTable,
+          thread.stringTable,
+          implementationFilter
+        );
+      return ProfileData.applyTransformOutputToThread(transformOutput, thread);
+    }
+  );
+
+  /**
+   * Single memoized computation of the search string filter, shared by
+   * `getFilteredThread` (which needs the stack-drop bitset) and
+   * `getSearchFilteredFuncMatchesBitSet` (which needs the func-match bitset).
+   */
+  const _getSearchStringFilterOutput: Selector<ProfileData.SearchStringFilterOutput> =
+    createSelector(
+      _getImplementationFilteredThread,
+      UrlState.getSearchStrings,
+      (thread: Thread, searchStrings) =>
+        globallyMemoizedComputeSearchStringFilterOutput(
+          thread.stackTable,
+          thread.frameTable,
+          thread.funcTable,
+          thread.resourceTable,
+          thread.sources,
+          thread.stringTable,
+          searchStrings
+        )
+    );
 
   const getFilteredThread: Selector<Thread> = createSelector(
     _getImplementationFilteredThread,
-    UrlState.getSearchStrings,
-    ProfileSelectors.getSourceTable,
-    ProfileData.filterThreadToSearchStrings
+    _getSearchStringFilterOutput,
+    (thread: Thread, { transformOutput }) =>
+      ProfileData.applyTransformOutputToThread(transformOutput, thread)
   );
+
+  /**
+   * Get a BitSet of func indices that match the current search strings.
+   * Returns null when there is no active search. This is used by the stack
+   * chart to dim non-matching nodes without recomputing on every draw call.
+   */
+  const getSearchFilteredFuncMatchesBitSet: Selector<BitSet | null> = (state) =>
+    _getSearchStringFilterOutput(state).funcMatchesSearchStrings;
 
   const getPreviewFilteredThread: Selector<Thread> = createSelector(
     getFilteredThread,
@@ -522,24 +681,40 @@ export function getThreadSelectorsWithMarkersPerThread(
    * unfiltered ctss samples based on an offset into the preview-filtered ctss
    * samples.
    */
-  const getPreviewFilteredCtssSampleIndexOffset: Selector<number> =
-    createSelector(
-      getFilteredCtssSamples,
-      ProfileSelectors.getPreviewSelection,
-      threadSelectors.getFilteredCtssSampleIndexOffset,
-      (samples, previewSelection, sampleIndexFromCommittedRange) => {
-        if (!previewSelection) {
-          return sampleIndexFromCommittedRange;
-        }
+  const getPreviewFilteredCtssSampleIndexOffsets: Selector<
+    [IndexIntoSamplesTable, IndexIntoSamplesTable]
+  > = createSelector(
+    getFilteredCtssSamples,
+    ProfileSelectors.getPreviewSelection,
+    threadSelectors.getFilteredCtssSampleIndexOffsets,
+    (samples, previewSelection, committedRange) => {
+      if (!previewSelection) {
+        return committedRange;
+      }
 
-        const [beginSampleIndex] = ProfileData.getSampleIndexRangeForSelection(
+      const [committedRangeBeginSampleIndex] = committedRange;
+      const [beginSampleIndex, endSampleIndex] =
+        ProfileData.getSampleIndexRangeForSelection(
           samples,
           previewSelection.selectionStart,
           previewSelection.selectionEnd
         );
 
-        return sampleIndexFromCommittedRange + beginSampleIndex;
-      }
+      return [
+        committedRangeBeginSampleIndex + beginSampleIndex,
+        committedRangeBeginSampleIndex + endSampleIndex,
+      ];
+    }
+  );
+
+  const getPreviewFilteredCtssSampleCategoriesAndSubcategories: Selector<SampleCategoriesAndSubcategories> =
+    createSelector(
+      threadSelectors.getUnfilteredCtssSampleCategoriesAndSubcategories,
+      getPreviewFilteredCtssSampleIndexOffsets,
+      ({ sampleCategories, sampleSubcategories }, [b, e]) => ({
+        sampleCategories: sampleCategories.subarray(b, e),
+        sampleSubcategories: sampleSubcategories.subarray(b, e),
+      })
     );
 
   const getTransformLabelL10nIds: Selector<TransformLabeL10nIds[]> =
@@ -566,10 +741,12 @@ export function getThreadSelectorsWithMarkersPerThread(
     getTransformStack,
     getRangeAndTransformFilteredThread,
     getFilteredThread,
+    getSearchFilteredFuncMatchesBitSet,
     getPreviewFilteredThread,
     getFilteredCtssSamples,
     getPreviewFilteredCtssSamples,
-    getPreviewFilteredCtssSampleIndexOffset,
+    getPreviewFilteredCtssSampleIndexOffsets,
+    getPreviewFilteredCtssSampleCategoriesAndSubcategories,
     getHasFilteredCtssSamples,
     getHasPreviewFilteredCtssSamples,
     getTransformLabelL10nIds,

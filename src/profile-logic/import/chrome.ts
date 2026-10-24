@@ -5,14 +5,22 @@
 import type {
   Profile,
   RawThread,
-  RawStackTable,
-  IndexIntoFuncTable,
   IndexIntoStackTable,
-  IndexIntoResourceTable,
   MixedObject,
 } from 'firefox-profiler/types';
+import { FrameFlag } from 'firefox-profiler/types';
 
-import { getEmptyProfile, getEmptyThread } from '../data-structures';
+import {
+  finishRawSamplesTableBuilder,
+  finishRawMarkerTableBuilder,
+  getEmptyProfile,
+  getEmptyThread,
+  getRawSamplesTableBuilderWithEventDelay,
+  getRawMarkerTableBuilderFromExisting,
+  type RawMarkerTableBuilder,
+  type RawSamplesTableBuilder,
+  type RawStackTableBuilder,
+} from '../data-structures';
 import type { StringTable } from '../../utils/string-table';
 import { ensureExists, coerce } from '../../utils/types';
 import {
@@ -22,7 +30,11 @@ import {
   INTERVAL_END,
 } from 'firefox-profiler/app-logic/constants';
 
-import { getOrCreateURIResource, getTimeRangeForThread } from '../profile-data';
+import { getTimeRangeForThread } from '../profile-data';
+import {
+  compositorScreenshotMarkerSchema,
+  convertScreenshotMarkersToStartEnd,
+} from '../process-screenshot-markers';
 import { GlobalDataCollector } from '../global-data-collector';
 
 // Chrome Tracing Event Spec:
@@ -41,6 +53,7 @@ export type TracingEventUnion =
   | ThreadSortIndexEvent
   | ScreenshotEvent
   | FallbackEndEvent
+  | ScriptCatchupEvent
   | TracingStartedInBrowserEvent;
 
 type TracingEvent<Event> = {
@@ -182,6 +195,27 @@ type TracingStartedInBrowserEvent = TracingEvent<{
   ph: 'I';
 }>;
 
+// Emitted for every parsed script when a trace is recorded with the
+// "disabled-by-default-devtools.v8-source-rundown" category (the DevTools
+// Performance panel enables it by default). This is the only place a Chrome
+// trace exposes the source map URL for a script. The CPU profile callFrames
+// don't carry it (for now?).
+type ScriptCatchupEvent = TracingEvent<{
+  name: 'ScriptCatchup';
+  args: {
+    data: {
+      executionContextId: number;
+      hasSourceUrl: boolean;
+      isModule: boolean;
+      isolate: string;
+      scriptId: number;
+      url?: string;
+      // The source map URL as declared by the script, often relative to `url`.
+      sourceMapUrl?: string;
+    };
+  };
+}>;
+
 function wrapCpuProfileInEvent(cpuProfile: CpuProfileData): CpuProfileEvent {
   return {
     name: 'CpuProfile',
@@ -269,9 +303,9 @@ export function attemptToConvertChromeProfile(
 
 type ThreadInfo = {
   thread: RawThread;
-  funcKeyToFuncId: Map<string, IndexIntoFuncTable>;
+  samples: RawSamplesTableBuilder;
+  markers: RawMarkerTableBuilder;
   nodeIdToStackId: Map<number | void, IndexIntoStackTable | null>;
-  originToResourceIndex: Map<string, IndexIntoResourceTable>;
   lastSeenTime: number;
   lastSampledTime: number;
   pid: number;
@@ -317,7 +351,8 @@ function getThreadInfo(
   if (cachedThreadInfo) {
     return cachedThreadInfo;
   }
-  const thread = getEmptyThread();
+  const samples = getRawSamplesTableBuilderWithEventDelay();
+  const thread = getEmptyThread({ samples });
   thread.pid = `${chunk.pid}`;
   // It looks like the TID information in Chrome's data isn't the system's TID
   // but some internal values only unique for a pid. Therefore let's generate a
@@ -339,7 +374,8 @@ function getThreadInfo(
   if (threadNameEvent) {
     thread.name = threadNameEvent.args.name;
     thread.isMainThread =
-      thread.name.startsWith('Cr') && thread.name.endsWith('Main');
+      (thread.name.startsWith('Cr') && thread.name.endsWith('Main')) ||
+      (!!chunk.pid && chunk.pid === chunk.tid);
   }
 
   const processNameEvent = findEvent<ProcessNameEvent>(
@@ -396,14 +432,16 @@ function getThreadInfo(
 
   profile.threads.push(thread);
 
-  const nodeIdToStackId = new Map();
+  const nodeIdToStackId = new Map<number | void, IndexIntoStackTable | null>();
   nodeIdToStackId.set(undefined, null);
 
-  const threadInfo = {
+  const markers = getRawMarkerTableBuilderFromExisting(thread.markers);
+
+  const threadInfo: ThreadInfo = {
     thread,
+    samples,
+    markers,
     nodeIdToStackId,
-    funcKeyToFuncId: new Map(),
-    originToResourceIndex: new Map(),
     lastSeenTime: chunk.ts / 1000,
     lastSampledTime: 0,
     pid: chunk.pid,
@@ -505,6 +543,9 @@ async function processTracingEvents(
   const globalDataCollector = new GlobalDataCollector();
   const stringTable = globalDataCollector.getStringTable();
 
+  const frameTable = globalDataCollector.getFrameTable();
+  const stackTable = globalDataCollector.getStackTableBuilder();
+
   let profileEvents: (ProfileEvent | CpuProfileEvent)[] = (eventsByName.get(
     'Profile'
   ) || []) as ProfileEvent[];
@@ -518,8 +559,23 @@ async function processTracingEvents(
     ensureExists(profile.meta.categories)
   );
 
-  const threadInfoByPidAndTid = new Map();
-  const threadInfoByThread = new Map();
+  // Build a lookup from script URL to its source map URL from any ScriptCatchup
+  // events in the trace. The declared source map URL is often relative to the
+  // script URL which matches how Gecko profiles store this column.
+  // Keyed by URL because the source table is deduped by URL too, and the CPU
+  // profile callFrames only expose the script URL (not the isolate), which is
+  // what would be needed to disambiguate scriptIds across isolates.
+  const sourceMapURLByScriptURL = new Map<string, string>();
+  for (const event of (eventsByName.get('ScriptCatchup') ??
+    []) as ScriptCatchupEvent[]) {
+    const { data } = event.args;
+    if (data.url && data.sourceMapUrl) {
+      sourceMapURLByScriptURL.set(data.url, data.sourceMapUrl);
+    }
+  }
+
+  const threadInfoByPidAndTid = new Map<string, ThreadInfo>();
+  const threadInfoByThread = new Map<RawThread, ThreadInfo>();
   for (const profileEvent of profileEvents) {
     // The thread info is all of the data that makes it possible to process an
     // individual thread.
@@ -530,8 +586,7 @@ async function processTracingEvents(
       profile,
       profileEvent
     );
-    const { thread, funcKeyToFuncId, nodeIdToStackId, originToResourceIndex } =
-      threadInfo;
+    const { samples: samplesTable, nodeIdToStackId } = threadInfo;
 
     let profileChunks: any[] = [];
     if (profileEvent.name === 'Profile') {
@@ -565,16 +620,8 @@ async function processTracingEvents(
         continue;
       }
 
-      const {
-        funcTable,
-        frameTable,
-        stackTable,
-        samples: samplesTable,
-        resourceTable,
-      } = thread;
-
       if (nodes) {
-        const parentMap = new Map();
+        const parentMap = new Map<number, number>();
         for (const node of nodes) {
           const { callFrame, id: nodeIndex } = node;
           let parent: number | void = undefined;
@@ -615,43 +662,35 @@ async function processTracingEvents(
           }
 
           const { functionName } = callFrame;
-          const funcKey = `${functionName}:${url || ''}:${lineNumber || 0}:${
-            columnNumber || 0
-          }`;
           const { category, isJS, relevantForJS } = getFunctionInfo(
             functionName,
             url !== undefined || lineNumber !== undefined
           );
-          let funcId = funcKeyToFuncId.get(funcKey);
-
-          if (funcId === undefined) {
-            // The function did not exist.
-            funcId = funcTable.length++;
-            funcTable.isJS.push(isJS);
-            funcTable.relevantForJS.push(relevantForJS);
-            const name = functionName !== '' ? functionName : '(anonymous)';
-            funcTable.name.push(stringTable.indexForString(name));
-            funcTable.resource.push(
-              isJS
-                ? getOrCreateURIResource(
-                    url || '<unknown>',
-                    resourceTable,
-                    stringTable,
-                    originToResourceIndex
-                  )
-                : -1
-            );
-            funcTable.source.push(
-              isJS && url ? globalDataCollector.indexForSource(null, url) : null
-            );
-            funcTable.lineNumber.push(
-              lineNumber === undefined ? null : lineNumber
-            );
-            funcTable.columnNumber.push(
-              columnNumber === undefined ? null : columnNumber
-            );
-            funcKeyToFuncId.set(funcKey, funcId);
-          }
+          const name = stringTable.indexForString(
+            functionName !== '' ? functionName : '(anonymous)'
+          );
+          const source =
+            isJS && url
+              ? globalDataCollector.indexForSource(
+                  null,
+                  url,
+                  1,
+                  1,
+                  sourceMapURLByScriptURL.get(url) ?? null
+                )
+              : null;
+          const resource = isJS
+            ? globalDataCollector.indexForURIResource(url || '<unknown>')
+            : -1;
+          const funcId = globalDataCollector.indexForFunc(
+            name,
+            isJS,
+            relevantForJS,
+            resource,
+            source,
+            lineNumber === undefined ? null : lineNumber,
+            columnNumber === undefined ? null : columnNumber
+          );
 
           // Node indexes start at 1, while frame indexes start at 0.
           const frameIndex = nodeIndex - 1;
@@ -661,16 +700,24 @@ async function processTracingEvents(
               'Unable to find the prefix stack index from a node index.'
             );
           }
-          frameTable.address[frameIndex] = -1;
+          let flags = FrameFlag.HasCategory;
+          if (lineNumber !== undefined) {
+            flags |= FrameFlag.HasLine;
+          }
+          if (columnNumber !== undefined) {
+            flags |= FrameFlag.HasColumn;
+          }
+          frameTable.flags[frameIndex] = flags;
+          frameTable.address[frameIndex] = 0;
           frameTable.category[frameIndex] = category;
           frameTable.subcategory[frameIndex] = 0;
           frameTable.func[frameIndex] = funcId;
-          frameTable.nativeSymbol[frameIndex] = null;
+          frameTable.lib[frameIndex] = 0;
+          frameTable.nativeSymbol[frameIndex] = 0;
           frameTable.innerWindowID[frameIndex] = 0;
-          frameTable.line[frameIndex] =
-            lineNumber === undefined ? null : lineNumber;
-          frameTable.column[frameIndex] =
-            columnNumber === undefined ? null : columnNumber;
+          frameTable.line[frameIndex] = lineNumber ?? 0;
+          frameTable.column[frameIndex] = columnNumber ?? 0;
+          frameTable.originalLocation[frameIndex] = 0;
           frameTable.length = Math.max(frameTable.length, frameIndex + 1);
 
           stackTable.frame.push(frameIndex);
@@ -711,9 +758,7 @@ async function processTracingEvents(
     }
   }
 
-  for (const thread of profile.threads) {
-    assertStackOrdering(thread.stackTable);
-  }
+  assertStackOrdering(stackTable);
 
   await extractScreenshots(
     threadInfoByPidAndTid,
@@ -808,6 +853,23 @@ async function processTracingEvents(
   const { shared } = globalDataCollector.finish();
   profile.shared = shared;
 
+  let hasScreenshots = false;
+  for (const [thread, threadInfo] of threadInfoByThread) {
+    thread.samples = finishRawSamplesTableBuilder(threadInfo.samples);
+    thread.markers = finishRawMarkerTableBuilder(threadInfo.markers);
+    const markers = convertScreenshotMarkersToStartEnd(
+      thread.markers,
+      stringTable
+    );
+    if (markers !== null) {
+      hasScreenshots = true;
+      thread.markers = markers;
+    }
+  }
+  if (hasScreenshots) {
+    profile.meta.markerSchema.push(compositorScreenshotMarkerSchema);
+  }
+
   return profile;
 }
 
@@ -823,7 +885,7 @@ async function extractScreenshots(
     // No screenshots were found, exit early.
     return;
   }
-  const { thread } = getThreadInfo(
+  const { markers } = getThreadInfo(
     threadInfoByPidAndTid,
     threadInfoByThread,
     eventsByName,
@@ -848,21 +910,20 @@ async function extractScreenshots(
       // The image could not be processed, do not add it.
       continue;
     }
-    thread.markers.data.push({
+    markers.data.push({
       type: 'CompositorScreenshot',
       url: stringTable.indexForString(urlString),
+      // Chrome's Screenshot events don't say which window they belong to, so
+      // they all share one made-up window ID.
       windowID: 'id',
-      windowWidth: size.width,
-      windowHeight: size.height,
+      windowSize: { width: size.width, height: size.height },
     });
-    thread.markers.name.push(
-      stringTable.indexForString('CompositorScreenshot')
-    );
-    thread.markers.startTime.push(screenshot.ts / 1000);
-    thread.markers.endTime.push(null);
-    thread.markers.phase.push(INSTANT);
-    thread.markers.category.push(graphicsIndex);
-    thread.markers.length++;
+    markers.name.push(stringTable.indexForString('CompositorScreenshot'));
+    markers.startTime.push(screenshot.ts / 1000);
+    markers.endTime.push(null);
+    markers.phase.push(INSTANT);
+    markers.category.push(graphicsIndex);
+    markers.length++;
   }
 }
 
@@ -894,7 +955,7 @@ function getImageSize(
  * For sanity, check that stacks are ordered where the prefix stack
  * always preceeds the current stack index in the StackTable.
  */
-function assertStackOrdering(stackTable: RawStackTable) {
+function assertStackOrdering(stackTable: RawStackTableBuilder) {
   const visitedStacks = new Set<number | null>([null]);
   for (let i = 0; i < stackTable.length; i++) {
     if (!visitedStacks.has(stackTable.prefix[i])) {
@@ -921,6 +982,32 @@ function extractMarkers(
     throw new Error('No "Other" category in empty profile category list');
   }
 
+  // Map to track category names to their indices.
+  const categoryNameToIndex = new Map<string, number>();
+  const categories = ensureExists(profile.meta.categories);
+  for (let i = 0; i < categories.length; i++) {
+    categoryNameToIndex.set(categories[i].name, i);
+  }
+
+  // Helper function to get or create a category index for a given category name.
+  function getOrCreateCategoryIndex(categoryName: string): number {
+    const existing = categoryNameToIndex.get(categoryName);
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    // Create a new category with a default color. The colors are not important
+    // since we don't visualize the marker colors yet.
+    const newIndex = categories.length;
+    categories.push({
+      name: categoryName,
+      color: 'grey',
+      subcategories: ['Other'],
+    });
+    categoryNameToIndex.set(categoryName, newIndex);
+    return newIndex;
+  }
+
   profile.meta.markerSchema = [
     {
       name: 'EventDispatch',
@@ -939,6 +1026,9 @@ function extractMarkers(
       ],
     },
   ];
+
+  // Track whether we've added the EventWithDetail schema
+  let hasEventWithDetailSchema = false;
 
   for (const [name, events] of eventsByName.entries()) {
     if (
@@ -985,16 +1075,24 @@ function extractMarkers(
           profile,
           event
         );
-        const { thread } = threadInfo;
-        const { markers } = thread;
+        const { markers } = threadInfo;
         let argData:
-          | (object & { type2?: unknown; category2?: unknown })
+          | (object & { type2?: unknown; category2?: unknown; detail?: string })
           | null = null;
         if ('args' in event && event.args && typeof event.args === 'object') {
-          argData = event.args.data || null;
+          // Some trace events have args.data, but others have args fields directly
+          // (e.g., "Source" markers have args.detail).
+          if (event.args.data) {
+            argData = event.args.data;
+          } else if (
+            'detail' in event.args &&
+            typeof event.args.detail === 'string'
+          ) {
+            argData = { detail: event.args.detail };
+          }
         }
+
         markers.name.push(stringTable.indexForString(name));
-        markers.category.push(otherCategoryIndex);
 
         if (argData && 'type' in argData) {
           argData.type2 = argData.type;
@@ -1003,11 +1101,41 @@ function extractMarkers(
           argData.category2 = argData.category;
         }
 
-        const newData = {
-          ...argData,
-          type: name,
-          category: event.cat,
-        };
+        // Add EventWithDetail schema the first time we encounter a detail field
+        if (argData?.detail && !hasEventWithDetailSchema) {
+          profile.meta.markerSchema.push({
+            // Generic schema for Chrome trace event markers with a detail field.
+            // This is used when compiling with clang -ftime-trace=file.json, which
+            // generates Source markers, ParseDeclarationOrFunctionDefinition markers,
+            // and similar compiler events with file paths or location details.
+            name: 'EventWithDetail',
+            chartLabel: '{marker.data.detail}',
+            tooltipLabel: '{marker.name}: {marker.data.detail}',
+            tableLabel: '{marker.data.detail}',
+            display: ['marker-chart', 'marker-table'],
+            fields: [
+              {
+                key: 'detail',
+                label: 'Details',
+                format: 'string',
+              },
+            ],
+          });
+          hasEventWithDetailSchema = true;
+        }
+
+        const newData = argData
+          ? {
+              ...argData,
+              type: argData?.detail ? 'EventWithDetail' : name,
+            }
+          : null;
+
+        // Store the category in the markers.category array.
+        const categoryIndex = event.cat
+          ? getOrCreateCategoryIndex(event.cat)
+          : otherCategoryIndex;
+        markers.category.push(categoryIndex);
 
         // @ts-expect-error Opt out of type checking for this one.
         markers.data.push(newData);

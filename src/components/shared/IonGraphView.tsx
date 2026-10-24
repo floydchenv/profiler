@@ -3,7 +3,7 @@
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
 import type { LineTimings } from 'firefox-profiler/types';
 
-import { GraphViewer, migrate } from 'iongraph-web/react';
+import { GraphViewerReact, migrate } from 'iongraph-web/react';
 import 'iongraph-web/style.css';
 
 import { useMemo } from 'react';
@@ -11,7 +11,6 @@ import { useMemo } from 'react';
 type IonGraphViewProps = {
   readonly sourceCode: string;
   readonly timings: LineTimings;
-  readonly hotSpotTimings: LineTimings;
 };
 
 export function IonGraphView(props: IonGraphViewProps) {
@@ -26,6 +25,9 @@ export function IonGraphView(props: IonGraphViewProps) {
     return <div />;
   }
   return (
-    <GraphViewer func={ionJSON.functions[0]} sampleCounts={props.timings} />
+    <GraphViewerReact
+      func={ionJSON.functions[0]}
+      sampleCounts={props.timings}
+    />
   );
 }

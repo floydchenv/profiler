@@ -308,6 +308,14 @@ export function getNetworkMarkerDetails(
     </TooltipDetail>
   );
 
+  if (payload.priorityHeader) {
+    details.push(
+      <TooltipDetail label="Priority Header" key="Network-Priority-Header">
+        {payload.priorityHeader}
+      </TooltipDetail>
+    );
+  }
+
   if (mimeType) {
     details.push(
       <TooltipDetail label={mimeTypeLabel} key={'Network-' + mimeTypeLabel}>
@@ -326,6 +334,22 @@ export function getNetworkMarkerDetails(
     details.push(
       <TooltipDetail label="Private Browsing" key="Network-Private Browsing">
         Yes
+      </TooltipDetail>
+    );
+  }
+
+  if (payload.secPurpose) {
+    details.push(
+      <TooltipDetail label="Sec-Purpose" key="Network-Sec-Purpose">
+        {payload.secPurpose}
+      </TooltipDetail>
+    );
+  }
+
+  if (payload.deliveryType) {
+    details.push(
+      <TooltipDetail label="Delivery Type" key="Network-Delivery Type">
+        {payload.deliveryType}
       </TooltipDetail>
     );
   }

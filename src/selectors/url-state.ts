@@ -31,10 +31,12 @@ import type {
   NativeSymbolInfo,
   TabID,
   IndexIntoSourceTable,
+  MarkerIndex,
 } from 'firefox-profiler/types';
 
 import type { TabSlug } from '../app-logic/tabs-handling';
 import type { MarkerRegExps } from '../profile-logic/marker-data';
+import type { SingleColumnSortState } from '../components/shared/TreeView';
 
 import urlStateReducer from '../reducers/url-state';
 import { formatMetaInfoString } from '../profile-logic/profile-metainfo';
@@ -75,15 +77,37 @@ export const getSourceViewSourceIndex: Selector<IndexIntoSourceTable | null> = (
 ) => getProfileSpecificState(state).sourceView.sourceIndex;
 export const getSourceViewScrollGeneration: Selector<number> = (state) =>
   getProfileSpecificState(state).sourceView.scrollGeneration;
-export const getSourceViewLineNumber: Selector<number | undefined> = (state) =>
-  getProfileSpecificState(state).sourceView.lineNumber;
+export const getSourceViewScrollToLineNumber: Selector<number | undefined> = (
+  state
+) => getProfileSpecificState(state).sourceView.scrollToLineNumber;
+export const getSourceViewHighlightedLine: Selector<number | null> = (state) =>
+  getProfileSpecificState(state).sourceView.highlightedLine;
 export const getAssemblyViewIsOpen: Selector<boolean> = (state) =>
   getProfileSpecificState(state).assemblyView.isOpen;
 export const getAssemblyViewNativeSymbol: Selector<NativeSymbolInfo | null> = (
   state
-) => getProfileSpecificState(state).assemblyView.nativeSymbol;
+) => {
+  const { nativeSymbols, currentNativeSymbol } =
+    getProfileSpecificState(state).assemblyView;
+  return currentNativeSymbol !== null
+    ? nativeSymbols[currentNativeSymbol]
+    : null;
+};
+export const getAssemblyViewCurrentNativeSymbolEntryIndex: Selector<
+  number | null
+> = (state) => getProfileSpecificState(state).assemblyView.currentNativeSymbol;
+export const getAssemblyViewNativeSymbolEntryCount: Selector<number> = (
+  state
+) => getProfileSpecificState(state).assemblyView.nativeSymbols.length;
 export const getAssemblyViewScrollGeneration: Selector<number> = (state) =>
   getProfileSpecificState(state).assemblyView.scrollGeneration;
+export const getAssemblyViewScrollToInstructionAddress: Selector<
+  number | undefined
+> = (state) =>
+  getProfileSpecificState(state).assemblyView.scrollToInstructionAddress;
+export const getAssemblyViewHighlightedInstruction: Selector<number | null> = (
+  state
+) => getProfileSpecificState(state).assemblyView.highlightedInstruction;
 export const getShowJsTracerSummary: Selector<boolean> = (state) =>
   getProfileSpecificState(state).showJsTracerSummary;
 
@@ -94,13 +118,26 @@ export const getCurrentSearchString: Selector<string> = (state) =>
   getProfileSpecificState(state).callTreeSearchString;
 export const getMarkersSearchString: Selector<string> = (state) =>
   getProfileSpecificState(state).markersSearchString;
+export const getMarkerTableSort: Selector<SingleColumnSortState[] | null> = (
+  state
+) => getProfileSpecificState(state).markerTableSort;
 export const getNetworkSearchString: Selector<string> = (state) =>
   getProfileSpecificState(state).networkSearchString;
 export const getSelectedTab: Selector<TabSlug> = (state) =>
   getUrlState(state).selectedTab;
-export const getInvertCallstack: Selector<boolean> = (state) =>
-  getSelectedTab(state) === 'calltree' &&
-  getProfileSpecificState(state).invertCallstack;
+export const getInvertCallstack: Selector<boolean> = (state) => {
+  const tab = getSelectedTab(state);
+  const profileSpecific = getProfileSpecificState(state);
+  if (tab === 'calltree') {
+    return profileSpecific.invertCallTree;
+  }
+  if (tab === 'flame-graph') {
+    return profileSpecific.invertFlameGraph;
+  }
+  return false;
+};
+export const getIncludeIdleSamples: Selector<boolean> = (state) =>
+  getProfileSpecificState(state).includeIdleSamples;
 
 export const getSelectedThreadIndexesOrNull: Selector<
   Set<ThreadIndex> | null
@@ -214,9 +251,19 @@ export const getTransformStack: DangerousSelectorWithArguments<
   );
 };
 
+export const getSelectedMarker: DangerousSelectorWithArguments<
+  MarkerIndex | null,
+  ThreadsKey
+> = (state, threadsKey) =>
+  getProfileSpecificState(state).selectedMarkers[threadsKey] ?? null;
+
 export const getIsBottomBoxOpen: Selector<boolean> = (state) => {
   const tab = getSelectedTab(state);
   return getProfileSpecificState(state).isBottomBoxOpenPerPanel[tab];
+};
+
+export const getIsBottomBoxFullscreen: Selector<boolean> = (state) => {
+  return getProfileSpecificState(state).isBottomBoxFullscreen;
 };
 
 /**
@@ -331,6 +378,8 @@ function _shouldAllowSymbolServerUrl(symbolServerUrl: string) {
     const otherAllowedHostnames = [
       'symbols.mozilla.org',
       'symbolication.services.mozilla.com',
+      'stage.reliost.nonprod.webservices.mozgcp.net',
+      'mozilla.symbols.samplyprofiler.com',
     ];
     if (!otherAllowedHostnames.includes(url.hostname)) {
       console.error(

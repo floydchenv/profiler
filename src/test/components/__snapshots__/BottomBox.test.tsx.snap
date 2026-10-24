@@ -50,7 +50,7 @@ exports[`BottomBox should show the assembly view when pressing the toggle button
     mov ebx, edi
   </div>
   <div
-    class="cm-nonZeroLine cm-line"
+    class="cm-line cm-nonZeroLine"
   >
     and ebx, 0x1400
   </div>
@@ -65,6 +65,7 @@ exports[`BottomBox should show the assembly view when pressing the toggle button
 exports[`BottomBox should show the source view when a line in the tree view is double-clicked 1`] = `
 <div
   aria-multiline="true"
+  aria-readonly="true"
   autocapitalize="off"
   autocorrect="off"
   class="cm-content"
@@ -120,7 +121,7 @@ exports[`BottomBox should show the source view when a line in the tree view is d
     </span>
   </div>
   <div
-    class="cm-nonZeroLine cm-line"
+    class="cm-line cm-nonZeroLine"
   >
     <span
       class="tok-variableName"

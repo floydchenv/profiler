@@ -39,7 +39,7 @@ import {
   changeMouseTimePosition,
 } from '../../actions/profile-view';
 
-import { getBottomBoxInfoForCallNode } from '../../profile-logic/profile-data';
+import { getBottomBoxInfoForCallNode } from '../../profile-logic/bottom-box';
 
 import type {
   Thread,
@@ -58,6 +58,7 @@ import type {
   Page,
   TimelineUnit,
 } from 'firefox-profiler/types';
+import type { BitSet } from 'firefox-profiler/utils/bitset';
 import type { CallNodeInfo } from 'firefox-profiler/profile-logic/call-node-info';
 
 import type { ConnectedProps } from '../../utils/connect';
@@ -87,6 +88,7 @@ type StateProps = {
   readonly hasFilteredCtssSamples: boolean;
   readonly useStackChartSameWidths: boolean;
   readonly timelineUnit: TimelineUnit;
+  readonly searchFilteredFuncMatchesBitSet: BitSet | null;
 };
 
 type DispatchProps = {
@@ -170,13 +172,31 @@ class StackChartImpl extends React.PureComponent<Props> {
       const bottomBoxInfo = getBottomBoxInfoForCallNode(
         nodeIndex,
         callNodeInfo,
-        thread
+        thread,
+        thread.samples
       );
       updateBottomBoxContentsAndMaybeOpen('stack-chart', bottomBoxInfo);
       return;
     }
 
-    handleCallNodeTransformShortcut(event, threadsKey, nodeIndex);
+    handleCallNodeTransformShortcut(event, threadsKey, callNodeInfo, nodeIndex);
+  };
+
+  _onDoubleClick = (callNodeIndex: IndexIntoCallNodeTable | null) => {
+    if (callNodeIndex === null) {
+      return;
+    }
+
+    const { thread, callNodeInfo, updateBottomBoxContentsAndMaybeOpen } =
+      this.props;
+
+    const bottomBoxInfo = getBottomBoxInfoForCallNode(
+      callNodeIndex,
+      callNodeInfo,
+      thread,
+      thread.samples
+    );
+    updateBottomBoxContentsAndMaybeOpen('stack-chart', bottomBoxInfo);
   };
 
   _onCopy = (event: ClipboardEvent) => {
@@ -213,7 +233,6 @@ class StackChartImpl extends React.PureComponent<Props> {
       timeRange,
       interval,
       previewSelection,
-      updatePreviewSelection,
       changeMouseTimePosition,
       callNodeInfo,
       categories,
@@ -227,6 +246,7 @@ class StackChartImpl extends React.PureComponent<Props> {
       hasFilteredCtssSamples,
       useStackChartSameWidths,
       timelineUnit,
+      searchFilteredFuncMatchesBitSet,
     } = this.props;
 
     const maxViewportHeight = combinedTimingRows.length * STACK_FRAME_HEIGHT;
@@ -270,7 +290,6 @@ class StackChartImpl extends React.PureComponent<Props> {
                   combinedTimingRows,
                   sameWidthsIndexToTimestampMap,
                   getMarker,
-                  updatePreviewSelection,
                   changeMouseTimePosition,
                   rangeStart: timeRange.start,
                   rangeEnd: timeRange.end,
@@ -278,6 +297,7 @@ class StackChartImpl extends React.PureComponent<Props> {
                   callNodeInfo,
                   categories,
                   selectedCallNodeIndex,
+                  onDoubleClick: this._onDoubleClick,
                   onSelectionChange: this._onSelectedCallNodeChange,
                   // TODO: support right clicking user timing markers #2354.
                   onRightClick: this._onRightClickedCallNodeChange,
@@ -287,6 +307,7 @@ class StackChartImpl extends React.PureComponent<Props> {
                   displayStackType: displayStackType,
                   useStackChartSameWidths,
                   timelineUnit,
+                  searchFilteredFuncMatchesBitSet,
                 }}
               />
             </div>
@@ -330,6 +351,8 @@ export const StackChart = explicitConnect<{}, StateProps, DispatchProps>({
         selectedThreadSelectors.getHasFilteredCtssSamples(state),
       useStackChartSameWidths: getStackChartSameWidths(state),
       timelineUnit: getProfileTimelineUnit(state),
+      searchFilteredFuncMatchesBitSet:
+        selectedThreadSelectors.getSearchFilteredFuncMatchesBitSet(state),
     };
   },
   mapDispatchToProps: {

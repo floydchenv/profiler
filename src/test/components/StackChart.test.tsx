@@ -33,6 +33,7 @@ import {
   changeImplementationFilter,
   changeCallTreeSummaryStrategy,
   updatePreviewSelection,
+  changeCallTreeSearchString,
 } from '../../actions/profile-view';
 import { changeSelectedTab } from '../../actions/app';
 import { selectedThreadSelectors } from '../../selectors/per-thread';
@@ -63,6 +64,7 @@ import {
 import { autoMockElementSize } from '../fixtures/mocks/element-size';
 
 import type { CssPixels, Store } from 'firefox-profiler/types';
+import { unserializeProfileOfArbitraryFormat } from 'firefox-profiler/profile-logic/process-profile';
 
 jest.useFakeTimers();
 
@@ -270,6 +272,56 @@ describe('StackChart', function () {
     expect(drawnFrames).not.toContain('Z');
   });
 
+  it('dims non-matching boxes when searching', function () {
+    const { dispatch, flushRafCalls } = setupSamples();
+    flushDrawLog();
+
+    // Dispatch a search string that matches some function names.
+    act(() => {
+      dispatch(changeCallTreeSearchString('B'));
+    });
+    flushRafCalls();
+
+    const drawCalls = flushDrawLog();
+
+    // Non-matching boxes should be drawn with the dimmed style.
+    const dimmedFillCalls = drawCalls.filter(
+      ([fn, value]) => fn === 'set fillStyle' && value === '#f9f9fa'
+    );
+    expect(dimmedFillCalls.length).toBeGreaterThan(0);
+  });
+
+  it('does not dim boxes that match the search string', function () {
+    // Use a single-node call stack so there is exactly one box.
+    const { dispatch, flushRafCalls } = setupSamples(`
+      A[cat:DOM]
+    `);
+    flushDrawLog();
+
+    // Search for "A" — the only node matches, so nothing should be dimmed.
+    act(() => {
+      dispatch(changeCallTreeSearchString('A'));
+    });
+    flushRafCalls();
+
+    const drawCalls = flushDrawLog();
+    const dimmedFillCalls = drawCalls.filter(
+      ([fn, value]) => fn === 'set fillStyle' && value === '#f9f9fa'
+    );
+    expect(dimmedFillCalls).toHaveLength(0);
+  });
+
+  it('does not dim any boxes when there is no search string', function () {
+    setupSamples();
+    const drawCalls = flushDrawLog();
+
+    // No dimmed fill should be applied without a search.
+    const dimmedFillCalls = drawCalls.filter(
+      ([fn, value]) => fn === 'set fillStyle' && value === '#f9f9fa'
+    );
+    expect(dimmedFillCalls).toHaveLength(0);
+  });
+
   describe('EmptyReasons', () => {
     it('shows reasons when a profile has no samples', () => {
       const profile = getEmptyProfile();
@@ -311,6 +363,21 @@ describe('StackChart', function () {
     const drawCalls = flushDrawLog();
     expect(document.body).toMatchSnapshot();
     expect(drawCalls).toMatchSnapshot();
+  });
+});
+
+describe('ArgumentValues', () => {
+  it('shows argument values when a profile has them', async () => {
+    const profiler = await unserializeProfileOfArbitraryFormat(
+      require('../fixtures/upgrades/argument-values.json')
+    );
+    const store = storeWithProfile(profiler);
+    const { getTooltip, moveMouse, findFillTextPosition } = setup(store);
+
+    moveMouse(findFillTextPosition('bar'));
+    const tooltip = getTooltip();
+    expect(within(ensureExists(tooltip)).getByText('bar')).toBeInTheDocument();
+    expect(tooltip).toMatchSnapshot();
   });
 });
 

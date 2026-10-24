@@ -1,7 +1,7 @@
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
-import { GREY_30 } from 'photon-colors';
+import { GREY_30, GREY_70 } from 'photon-colors';
 import * as React from 'react';
 import { TIMELINE_MARGIN_RIGHT } from '../../app-logic/constants';
 import { withChartViewport, type Viewport } from '../shared/chart/Viewport';
@@ -10,13 +10,16 @@ import { FastFillStyle } from '../../utils';
 import TextMeasurement from '../../utils/text-measurement';
 import { formatMilliseconds, formatBytes } from '../../utils/format-numbers';
 import { bisectionLeft, bisectionRight } from '../../utils/bisect';
-import type {
-  updatePreviewSelection,
-  changeMouseTimePosition,
-} from '../../actions/profile-view';
+import type { changeMouseTimePosition } from '../../actions/profile-view';
 
 type ChangeMouseTimePosition = typeof changeMouseTimePosition;
-import { mapCategoryColorNameToStackChartStyles } from '../../utils/colors';
+import {
+  mapCategoryColorNameToStackChartStyles,
+  getDimmedStyles,
+  getForegroundColor,
+  getBackgroundColor,
+} from '../../utils/colors';
+import { ValueSummaryReader } from 'devtools-reps';
 import { TooltipCallNode } from '../tooltip/CallNode';
 import { TooltipMarker } from '../tooltip/Marker';
 
@@ -38,6 +41,8 @@ import type {
   Page,
   TimelineUnit,
 } from 'firefox-profiler/types';
+import type { BitSet } from 'firefox-profiler/utils/bitset';
+import { checkBit } from 'firefox-profiler/utils/bitset';
 import type { CallNodeInfo } from 'firefox-profiler/profile-logic/call-node-info';
 
 import type {
@@ -50,7 +55,6 @@ import type {
   IndexIntoStackTiming,
   SameWidthsIndexToTimestampMap,
 } from '../../profile-logic/stack-timing';
-import type { WrapFunctionInDispatch } from '../../utils/connect';
 
 type OwnProps = {
   readonly thread: Thread;
@@ -63,14 +67,12 @@ type OwnProps = {
   readonly combinedTimingRows: CombinedTimingRows;
   readonly sameWidthsIndexToTimestampMap: SameWidthsIndexToTimestampMap;
   readonly stackFrameHeight: CssPixels;
-  readonly updatePreviewSelection: WrapFunctionInDispatch<
-    typeof updatePreviewSelection
-  >;
   readonly changeMouseTimePosition: ChangeMouseTimePosition;
   readonly getMarker: (param: MarkerIndex) => Marker;
   readonly categories: CategoryList;
   readonly callNodeInfo: CallNodeInfo;
   readonly selectedCallNodeIndex: IndexIntoCallNodeTable | null;
+  readonly onDoubleClick: (param: IndexIntoCallNodeTable | null) => void;
   readonly onSelectionChange: (param: IndexIntoCallNodeTable | null) => void;
   readonly onRightClick: (param: IndexIntoCallNodeTable | null) => void;
   readonly shouldDisplayTooltips: () => boolean;
@@ -79,6 +81,7 @@ type OwnProps = {
   readonly displayStackType: boolean;
   readonly useStackChartSameWidths: boolean;
   readonly timelineUnit: TimelineUnit;
+  readonly searchFilteredFuncMatchesBitSet: BitSet | null;
 };
 
 type Props = Readonly<
@@ -93,6 +96,7 @@ type HoveredStackTiming = {
 };
 
 import './Canvas.css';
+import { lightDark } from 'firefox-profiler/utils/dark-mode';
 
 const ROW_CSS_PIXELS_HEIGHT = 16;
 const TEXT_CSS_PIXELS_OFFSET_START = 3;
@@ -183,6 +187,7 @@ class StackChartCanvasImpl extends React.PureComponent<Props> {
       getMarker,
       marginLeft,
       useStackChartSameWidths,
+      searchFilteredFuncMatchesBitSet,
       viewport: {
         containerWidth,
         containerHeight,
@@ -224,7 +229,7 @@ class StackChartCanvasImpl extends React.PureComponent<Props> {
     const devicePixelsWidth = containerWidth * cssToDeviceScale;
     const devicePixelsHeight = containerHeight * cssToDeviceScale;
 
-    fastFillStyle.set('#ffffff');
+    fastFillStyle.set(getBackgroundColor());
     ctx.fillRect(0, 0, devicePixelsWidth, devicePixelsHeight);
 
     const viewportDevicePixelsTop = viewportTop * cssToDeviceScale;
@@ -480,9 +485,11 @@ class StackChartCanvasImpl extends React.PureComponent<Props> {
 
         // Look up information about this stack frame.
         let text, category, isSelected;
+        let currentFuncIndex: number | null = null;
         if ('callNode' in stackTiming && stackTiming.callNode) {
           const callNodeIndex = stackTiming.callNode[i];
           const funcIndex = callNodeTable.func[callNodeIndex];
+          currentFuncIndex = funcIndex;
           const funcNameIndex = thread.funcTable.name[funcIndex];
           text = thread.stringTable.getString(funcNameIndex);
           const categoryIndex = callNodeTable.category[callNodeIndex];
@@ -507,14 +514,24 @@ class StackChartCanvasImpl extends React.PureComponent<Props> {
           depth === hoveredItem.depth &&
           i === hoveredItem.stackTimingIndex;
 
-        const colorStyles = mapCategoryColorNameToStackChartStyles(
-          category.color
-        );
+        // When a search is active, use the dimmed style for non-matching nodes
+        // so that matching nodes stand out with their category color.
+        // Hovered or selected nodes always use their real category color.
+        const isDimmed =
+          searchFilteredFuncMatchesBitSet !== null &&
+          currentFuncIndex !== null &&
+          !checkBit(searchFilteredFuncMatchesBitSet, currentFuncIndex) &&
+          !isHovered &&
+          !isSelected;
+        const colorStyles = isDimmed
+          ? getDimmedStyles()
+          : mapCategoryColorNameToStackChartStyles(category.color);
+
         // Draw the box.
         fastFillStyle.set(
           isHovered || isSelected
-            ? colorStyles.selectedFillStyle
-            : colorStyles.unselectedFillStyle
+            ? colorStyles.getSelectedFillStyle()
+            : colorStyles.getUnselectedFillStyle()
         );
         ctx.fillRect(
           intX,
@@ -542,11 +559,11 @@ class StackChartCanvasImpl extends React.PureComponent<Props> {
         if (textW > textMeasurement.minWidth) {
           const fittedText = textMeasurement.getFittedText(text, textW);
           if (fittedText) {
-            fastFillStyle.set(
-              isHovered || isSelected
-                ? colorStyles.selectedTextColor
-                : '#000000'
-            );
+            if (isHovered || isSelected || isDimmed) {
+              fastFillStyle.set(colorStyles.getSelectedTextColor());
+            } else {
+              fastFillStyle.set(getForegroundColor());
+            }
             ctx.fillText(fittedText, textX, intY + textDevicePixelsOffsetTop);
           }
         }
@@ -554,7 +571,7 @@ class StackChartCanvasImpl extends React.PureComponent<Props> {
     }
 
     // Draw the borders on the left and right.
-    fastFillStyle.set(GREY_30);
+    fastFillStyle.set(lightDark(GREY_30, GREY_70));
     ctx.fillRect(
       pixelAtViewportPosition(0),
       0,
@@ -624,6 +641,27 @@ class StackChartCanvasImpl extends React.PureComponent<Props> {
       timelineUnit === 'bytes'
         ? formatBytes(duration)
         : formatMilliseconds(duration);
+    let argumentSummaries = undefined;
+    if (timing.argumentValues) {
+      const argumentValuesIndex = timing.argumentValues[stackTimingIndex];
+      if (
+        argumentValuesIndex !== -1 &&
+        thread.tracedValuesBuffer &&
+        thread.tracedObjectShapes
+      ) {
+        const argSummaries = ValueSummaryReader.getArgumentSummaries(
+          thread.tracedValuesBuffer,
+          thread.tracedObjectShapes,
+          argumentValuesIndex
+        );
+        // The API maybe needs work - getArgumentSummaries can return a string indicating
+        // that the argument summaries for a given call were missing (this can happen if they
+        // were overwritten in the underlying ring buffer)
+        if (typeof argSummaries !== 'string') {
+          argumentSummaries = argSummaries;
+        }
+      }
+    }
 
     return (
       <TooltipCallNode
@@ -638,21 +676,22 @@ class StackChartCanvasImpl extends React.PureComponent<Props> {
         callTreeSummaryStrategy="timing"
         durationText={durationText}
         displayStackType={displayStackType}
+        argumentValues={argumentSummaries}
       />
     );
   };
 
   _onDoubleClickStack = (hoveredItem: HoveredStackTiming | null) => {
-    if (hoveredItem === null) {
+    if (!hoveredItem) {
       return;
     }
-    const { depth, stackTimingIndex } = hoveredItem;
-    const { combinedTimingRows, updatePreviewSelection } = this.props;
-    updatePreviewSelection({
-      isModifying: false,
-      selectionStart: combinedTimingRows[depth].start[stackTimingIndex],
-      selectionEnd: combinedTimingRows[depth].end[stackTimingIndex],
-    });
+
+    const result =
+      this._getCallNodeIndexOrMarkerIndexFromHoveredItem(hoveredItem);
+
+    if (result && result.type === 'call-node') {
+      this.props.onDoubleClick(result.index);
+    }
   };
 
   _getCallNodeIndexOrMarkerIndexFromHoveredItem(

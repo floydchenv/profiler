@@ -12,6 +12,7 @@ import {
 import { TooltipMarker } from '../../components/tooltip/Marker';
 import { storeWithProfile } from '../fixtures/stores';
 import {
+  addCompositorScreenshotSchemaIfNeeded,
   addMarkersToThreadWithCorrespondingSamples,
   getProfileFromTextSamples,
   getNetworkMarkers,
@@ -686,6 +687,30 @@ describe('TooltipMarker', function () {
     expect(container.firstChild).toMatchSnapshot();
   });
 
+  it('renders the Sec-Purpose of a prefetched request', () => {
+    setupWithPayload(
+      getNetworkMarkers({
+        uri: 'https://example.org/next-page.html',
+        payload: { secPurpose: 'prefetch;anonymous-client-ip' },
+      })
+    );
+
+    expect(getValueForProperty('Sec-Purpose')).toBe(
+      'prefetch;anonymous-client-ip'
+    );
+  });
+
+  it('renders the delivery type of a navigation served from a prefetch', () => {
+    setupWithPayload(
+      getNetworkMarkers({
+        uri: 'https://example.org/next-page.html',
+        payload: { deliveryType: 'navigational-prefetch' },
+      })
+    );
+
+    expect(getValueForProperty('Delivery Type')).toBe('navigational-prefetch');
+  });
+
   it('renders the page information for network markers', () => {
     setupWithPayload(
       getNetworkMarkers({
@@ -1156,11 +1181,11 @@ describe('TooltipMarker', function () {
           type: 'CompositorScreenshot',
           url: screenshotUrlIndex,
           windowID: 'XXX',
-          windowWidth: 600,
-          windowHeight: 300,
+          windowSize: { width: 600, height: 300 },
         },
       ],
     ]);
+    addCompositorScreenshotSchemaIfNeeded(profile);
 
     const store = storeWithProfile(profile);
     const { getState } = store;
@@ -1178,23 +1203,6 @@ describe('TooltipMarker', function () {
     );
 
     expect(container.firstChild).toMatchSnapshot();
-  });
-
-  it('renders the tooltip of CompositorScreenshotWindowDestroyed', () => {
-    setupWithPayload([
-      [
-        'CompositorScreenshotWindowDestroyed',
-        1,
-        2,
-        {
-          type: 'CompositorScreenshot',
-          windowID: 'XXX',
-          url: undefined,
-        },
-      ],
-    ]);
-
-    expect(document.body).toMatchSnapshot();
   });
 
   it('shows the source thread for markers from a merged thread', function () {
@@ -1276,8 +1284,7 @@ describe('TooltipMarker', function () {
             type: 'CompositorScreenshot',
             url: screenshotUrlIndex,
             windowID: 'XXX',
-            windowWidth: 600,
-            windowHeight: 300,
+            windowSize: { width: 600, height: 300 },
           },
         ],
       ]
@@ -1333,6 +1340,49 @@ describe('TooltipMarker', function () {
   });
 
   describe('filter button', () => {
+    function setupFilterButton(hideFilterButton: boolean) {
+      const profile = getProfileWithMarkers([
+        ['Reflow', 1, 2, { type: 'tracing', category: 'Paint' }],
+      ]);
+      const store = storeWithProfile(profile);
+      const state = store.getState();
+      const getMarker = selectedThreadSelectors.getMarkerGetter(state);
+      const markerIndexes =
+        selectedThreadSelectors.getFullMarkerListIndexes(state);
+
+      render(
+        <Provider store={store}>
+          <TooltipMarker
+            markerIndex={markerIndexes[0]}
+            marker={getMarker(markerIndexes[0])}
+            threadsKey={0}
+            restrictHeightWidth={true}
+            hideFilterButton={hideFilterButton}
+          />
+        </Provider>
+      );
+    }
+
+    it('hides the filter button when hideFilterButton is true', () => {
+      setupFilterButton(true);
+
+      expect(
+        screen.queryByRole('button', {
+          name: /only show markers matching:/i,
+        })
+      ).not.toBeInTheDocument();
+    });
+
+    it('shows the filter button when hideFilterButton is false', () => {
+      setupFilterButton(false);
+
+      expect(
+        screen.getByRole('button', {
+          name: /only show markers matching:/i,
+        })
+      ).toBeInTheDocument();
+    });
+
     it('shows the filter button for markers without spaces in the label', () => {
       // Tooltip label: "Reflow"
       const profile = getProfileWithMarkers([

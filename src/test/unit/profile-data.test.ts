@@ -18,15 +18,19 @@ import {
   getSampleIndexClosestToStartTime,
   getSampleIndexToCallNodeIndex,
   getTreeOrderComparator,
-  getSamplesSelectedStates,
+  getSampleRelationsToNode,
+  SampleRelations,
   extractProfileFilterPageData,
   findAddressProofForFile,
   calculateFunctionSizeLowerBound,
+  computeFrameTableFromRawFrameTable,
+  computeNativeSymbolTableFromRawNativeSymbolTable,
   getNativeSymbolsForCallNode,
   getNativeSymbolInfo,
   computeTimeColumnForRawSamplesTable,
+  getCallNodeFramePerStack,
+  getTotalNativeSymbolTimingsForCallNode,
 } from '../../profile-logic/profile-data';
-import { resourceTypes } from '../../profile-logic/data-structures';
 import {
   createGeckoProfile,
   createGeckoProfileWithJsTimings,
@@ -59,6 +63,15 @@ import type {
   RawProfileSharedData,
   IndexIntoFrameTable,
   IndexIntoSourceTable,
+  IndexIntoCategoryList,
+  IndexIntoNativeSymbolTable,
+} from 'firefox-profiler/types';
+import {
+  SampleRelationToNode,
+  FillBucket,
+  ResourceType,
+  FrameFlag,
+  FuncFlag,
 } from 'firefox-profiler/types';
 
 describe('string-table', function () {
@@ -152,18 +165,24 @@ describe('process-profile', function () {
 
     it('should have a profile-wide libs property', function () {
       expect('libs' in profile).toBeTruthy();
+      expect('stackTable' in profile.shared).toBeTruthy();
+      expect('frameTable' in profile.shared).toBeTruthy();
+      expect('funcTable' in profile.shared).toBeTruthy();
+      expect('resourceTable' in profile.shared).toBeTruthy();
     });
 
     it('should have threads that are objects of the right shape', function () {
       for (const thread of profile.threads) {
         expect(typeof thread).toEqual('object');
-        expect('libs' in thread).toBeFalsy();
         expect('samples' in thread).toBeTruthy();
-        expect('stackTable' in thread).toBeTruthy();
-        expect('frameTable' in thread).toBeTruthy();
         expect('markers' in thread).toBeTruthy();
-        expect('funcTable' in thread).toBeTruthy();
-        expect('resourceTable' in thread).toBeTruthy();
+
+        // Shared data which is not part of a thread:
+        expect('libs' in thread).toBeFalsy();
+        expect('stackTable' in thread).toBeFalsy();
+        expect('frameTable' in thread).toBeFalsy();
+        expect('funcTable' in thread).toBeFalsy();
+        expect('resourceTable' in thread).toBeFalsy();
       }
     });
 
@@ -226,35 +245,60 @@ describe('process-profile', function () {
     });
 
     it('should create one function per frame, except for extra frames from return address nudging', function () {
-      const { shared, threads } = profile;
-      const thread = threads[0];
-      expect(thread.frameTable.length).toEqual(9);
-      expect('location' in thread.frameTable).toBeFalsy();
-      expect('func' in thread.frameTable).toBeTruthy();
-      expect('resource' in thread.funcTable).toBeTruthy();
-      expect(thread.funcTable.length).toEqual(7);
-      expect(thread.frameTable.func[0]).toEqual(0);
-      expect(thread.frameTable.func[1]).toEqual(1);
-      expect(thread.frameTable.func[2]).toEqual(2);
-      expect(thread.frameTable.func[3]).toEqual(3);
-      expect(thread.frameTable.func[4]).toEqual(4);
-      expect(thread.frameTable.func[5]).toEqual(5);
-      expect(thread.frameTable.func[6]).toEqual(6);
-      expect(thread.frameTable.func[7]).toEqual(2);
-      expect(thread.frameTable.func[8]).toEqual(1);
-      expect(thread.frameTable.address[0]).toEqual(-1);
+      const { shared } = profile;
+
+      // The Gecko profile has three threads, default:GeckoMain, default:Compositor, tab:GeckoMain.
+
+      // The function table contains 11 items; 3 items are shared between the threads
+      // ("(root)", "Startup::XRE_Main", "frobnicate"), and 4 items per process which
+      // are "unique" to that process; they are functions for unsymbolicated addresses.
+      // The same addresses are used in both processes, but we give the processes different
+      // library mappings.
+      // The parent process has a library resource for a 'firefox' binary and the content
+      // process has a library resource for a 'firefox-webcontent' binary. This makes
+      // those 4 native functions distinct, and we end up with 4 + 3 + 4 = 11 functions
+      // in the shared funcTable.
+      expect(shared.funcTable.length).toEqual(11);
+
+      // The Gecko profile frameTable has 7 frames per thread.
+      // The shared frameTable has 27 items: 7 * 3 + 2 * 3
+      // - 7 per thread from the gecko thread's frameTable - these all get concatenated
+      //   together to form the shared frameTable
+      // - 2 per thread from splitting two of these frames (per thread) into "nudged"
+      //   and "non-nudged" instances
+      expect(shared.frameTable.length).toEqual((7 + 2) * 3);
+
+      expect('location' in shared.frameTable).toBeFalsy();
+      expect('func' in shared.frameTable).toBeTruthy();
+      expect('resource' in shared.funcTable).toBeTruthy();
+
+      expect(shared.frameTable.func[0]).toEqual(0);
+      expect(shared.frameTable.func[1]).toEqual(1);
+      expect(shared.frameTable.func[2]).toEqual(2);
+      expect(shared.frameTable.func[3]).toEqual(3);
+      expect(shared.frameTable.func[4]).toEqual(4);
+      expect(shared.frameTable.func[5]).toEqual(5);
+      expect(shared.frameTable.func[6]).toEqual(6);
+      expect(shared.frameTable.func[21]).toEqual(2);
+      expect(shared.frameTable.func[22]).toEqual(2);
+      expect(shared.frameTable.func[24]).toEqual(1);
+      expect(shared.frameTable.func[25]).toEqual(1);
+      expect(shared.frameTable.flags[0] & FrameFlag.HasAddress).toBe(0);
       // The next two addresses were return addresses which were "nudged"
       // by one byte to point into the calling instruction.
-      expect(thread.frameTable.address[1]).toEqual(0xf83);
-      expect(thread.frameTable.address[2]).toEqual(0x1a44);
-      expect(thread.frameTable.address[3]).toEqual(-1);
-      expect(thread.frameTable.address[4]).toEqual(-1);
-      expect(thread.frameTable.address[5]).toEqual(0x1bcd);
-      expect(thread.frameTable.address[6]).toEqual(0x1bce);
+      expect(shared.frameTable.address[1]).toEqual(0xf83);
+      expect(shared.frameTable.address[2]).toEqual(0x1a44);
+      expect(shared.frameTable.flags[3] & FrameFlag.HasAddress).toBe(0);
+      expect(shared.frameTable.flags[4] & FrameFlag.HasAddress).toBe(0);
+      expect(shared.frameTable.address[5]).toEqual(0x1bcd);
+      expect(shared.frameTable.address[6]).toEqual(0x1bce);
       // Here are the non-nudged addresses for when they were sampled directly.
-      expect(thread.frameTable.address[7]).toEqual(0x1a45);
-      expect(thread.frameTable.address[8]).toEqual(0xf84);
-      const funcTableNames = thread.funcTable.name.map(
+      expect(shared.frameTable.address[21]).toEqual(0x1a45);
+      expect(shared.frameTable.address[22]).toEqual(0x1a45);
+      expect(shared.frameTable.address[24]).toEqual(0xf84);
+      expect(shared.frameTable.address[25]).toEqual(0xf84);
+      const funcTableNames = Array.from(
+        shared.funcTable.name,
         (nameIndex) => shared.stringArray[nameIndex]
       );
       expect(funcTableNames[0]).toEqual('(root)');
@@ -262,28 +306,33 @@ describe('process-profile', function () {
       expect(funcTableNames[2]).toEqual('0x100001a45');
       expect(funcTableNames[3]).toEqual('Startup::XRE_Main');
       expect(funcTableNames[4]).toEqual('frobnicate');
-      const chromeSourceIndex = thread.funcTable.source[4];
+      const chromeSourceIndex = shared.funcTable.source[4];
       if (typeof chromeSourceIndex !== 'number') {
         throw new Error('chromeSourceIndex must be a number');
       }
       const chromeStringIndex =
         profile.shared.sources.filename[chromeSourceIndex];
       expect(shared.stringArray[chromeStringIndex]).toEqual('chrome://blargh');
-      expect(thread.funcTable.lineNumber[4]).toEqual(34);
-      expect(thread.funcTable.columnNumber[4]).toEqual(35);
+      expect(shared.funcTable.lineNumber[4]).toEqual(34);
+      expect(shared.funcTable.columnNumber[4]).toEqual(35);
     });
 
     it('nudges return addresses but not sampled instruction pointer values', function () {
       const profile = processGeckoProfile(createGeckoProfile());
       const thread = profile.threads[0];
+      const shared = profile.shared;
       function getFrameAddressesForSampleIndex(sample: IndexIntoSamplesTable) {
         const addresses = [];
         let stack = thread.samples.stack[sample];
         while (stack !== null) {
+          const frame = shared.stackTable.frame[stack];
           addresses.push(
-            thread.frameTable.address[thread.stackTable.frame[stack]]
+            (shared.frameTable.flags[frame] & FrameFlag.HasAddress) !== 0
+              ? shared.frameTable.address[frame]
+              : -1
           );
-          stack = thread.stackTable.prefix[stack];
+          const offset = shared.stackTable.prefixOffset[stack];
+          stack = offset === 0 ? null : stack - offset;
         }
         addresses.reverse();
         return addresses;
@@ -295,35 +344,35 @@ describe('process-profile', function () {
     });
 
     it('should create no entries in nativeSymbols before symbolication', function () {
-      const { threads } = profile;
-      const thread = threads[0];
-      expect(thread.frameTable.length).toEqual(9);
-      expect('nativeSymbol' in thread.frameTable).toBeTruthy();
-      expect(thread.nativeSymbols.length).toEqual(0);
-      expect(thread.frameTable.nativeSymbol[0]).toEqual(null);
-      expect(thread.frameTable.nativeSymbol[1]).toEqual(null);
-      expect(thread.frameTable.nativeSymbol[2]).toEqual(null);
-      expect(thread.frameTable.nativeSymbol[3]).toEqual(null);
-      expect(thread.frameTable.nativeSymbol[4]).toEqual(null);
-      expect(thread.frameTable.nativeSymbol[5]).toEqual(null);
-      expect(thread.frameTable.nativeSymbol[6]).toEqual(null);
-      expect(thread.frameTable.nativeSymbol[7]).toEqual(null);
-      expect(thread.frameTable.nativeSymbol[8]).toEqual(null);
+      const shared = profile.shared;
+      expect(shared.frameTable.length).toEqual(27);
+      expect('nativeSymbol' in shared.frameTable).toBeTruthy();
+      expect(shared.nativeSymbols.length).toEqual(0);
+      const flags = shared.frameTable.flags;
+      let allUnset = true;
+      for (let i = 0; i < shared.frameTable.length; i++) {
+        if ((flags[i] & FrameFlag.HasNativeSymbol) !== 0) {
+          allUnset = false;
+          break;
+        }
+      }
+      expect(allUnset).toBeTrue();
     });
 
     it('should create one resource per used library', function () {
-      const { shared, threads } = profile;
-      const thread = threads[0];
-      expect(thread.resourceTable.length).toEqual(3);
-      expect(thread.resourceTable.type[0]).toEqual(resourceTypes.addon);
-      expect(thread.resourceTable.type[1]).toEqual(resourceTypes.library);
-      expect(thread.resourceTable.type[2]).toEqual(resourceTypes.url);
-      const [name0, name1, name2] = thread.resourceTable.name;
+      const shared = profile.shared;
+      expect(shared.resourceTable.length).toEqual(4);
+      expect(shared.resourceTable.type[0]).toEqual(ResourceType.Addon);
+      expect(shared.resourceTable.type[1]).toEqual(ResourceType.Library);
+      expect(shared.resourceTable.type[2]).toEqual(ResourceType.Url);
+      expect(shared.resourceTable.type[3]).toEqual(ResourceType.Library);
+      const [name0, name1, name2, name3] = shared.resourceTable.name;
       expect(shared.stringArray[name0]).toEqual(
         'Extension "Form Autofill" (ID: formautofill@mozilla.org)'
       );
       expect(shared.stringArray[name1]).toEqual('firefox');
       expect(shared.stringArray[name2]).toEqual('chrome://blargh');
+      expect(shared.stringArray[name3]).toEqual('firefox-webcontent');
     });
   });
 
@@ -471,33 +520,29 @@ describe('profile-data', function () {
     const callNodeTable = callNodeInfo.getCallNodeTable();
 
     it('should create one callNode per original stack', function () {
-      // After nudgeReturnAddresses, the stack table now has 8 entries.
-      expect(thread.stackTable.length).toEqual(8);
-      // But the call node table only has 5, same as the original stack table.
-      // That's because, whenever nudgeReturnAddresses duplicates frames (one nudged
+      // After nudgeReturnAddresses, the stack table now has 24 entries, 8 per original thread.
+      expect(thread.stackTable.length).toEqual(24);
+      // But the call node table only has 9.
+      // This is because we de-duplicate nodes with the same function, and all threads share
+      // the same funcs except for the native functions which have a different library in the
+      // content process.
+      // Furthermore, whenever nudgeReturnAddresses duplicates frames (one nudged
       // and one non-nudged), the two frames still share the same func, so the call
       // node table respects that func sharing.
-      expect(callNodeTable.length).toEqual(5);
+      expect(callNodeTable.length).toEqual(9);
       expect('prefix' in callNodeTable).toBeTruthy();
       expect('func' in callNodeTable).toBeTruthy();
-      expect(callNodeTable.func[0]).toEqual(0);
-      expect(callNodeTable.func[1]).toEqual(1);
-      expect(callNodeTable.func[2]).toEqual(2);
-      expect(callNodeTable.func[3]).toEqual(3);
     });
   });
 
-  function _getStackList(
-    thread: Thread,
-    stackIndex: IndexIntoStackTable | null
-  ) {
-    if (typeof stackIndex !== 'number') {
+  function _getStackList(thread: Thread, stackIndex: IndexIntoStackTable) {
+    if (typeof stackIndex !== 'number' || stackIndex === -1) {
       throw new Error('stackIndex must be a number');
     }
     const { prefix } = thread.stackTable;
     const stackList = [];
-    let nextStack: IndexIntoStackTable | null = stackIndex;
-    while (nextStack !== null) {
+    let nextStack: IndexIntoStackTable = stackIndex;
+    while (nextStack !== -1) {
       if (typeof nextStack !== 'number') {
         throw new Error('nextStack must be a number');
       }
@@ -779,16 +824,17 @@ describe('symbolication', function () {
       const symbolicationPromise = symbolicateProfile(
         unsymbolicatedProfile,
         symbolStore,
-        (threadIndex, symbolicationStepInfo) => {
+        (symbolicationStepInfo) => {
           if (!symbolicatedProfile) {
             throw new Error('symbolicatedProfile cannot be null');
           }
-          const { thread } = applySymbolicationSteps(
-            symbolicatedProfile.threads[threadIndex],
+          const { threads, shared } = applySymbolicationSteps(
+            symbolicatedProfile.threads,
             symbolicatedProfile.shared,
             [symbolicationStepInfo]
           );
-          symbolicatedProfile.threads[threadIndex] = thread;
+          symbolicatedProfile.threads = threads;
+          symbolicatedProfile.shared = shared;
         }
       );
       return symbolicationPromise;
@@ -796,12 +842,12 @@ describe('symbolication', function () {
 
     it('should assign correct symbols to frames', function () {
       function functionNameForFrameInThread(
-        thread: RawThread,
+        _thread: RawThread,
         shared: RawProfileSharedData,
         frameIndex: IndexIntoFrameTable
       ) {
-        const funcIndex = thread.frameTable.func[frameIndex];
-        const funcNameStringIndex = thread.funcTable.name[funcIndex];
+        const funcIndex = shared.frameTable.func[frameIndex];
+        const funcNameStringIndex = shared.funcTable.name[funcIndex];
         return shared.stringArray[funcNameStringIndex];
       }
       if (!unsymbolicatedProfile || !symbolicatedProfile) {
@@ -857,7 +903,7 @@ describe('filter-by-implementation', function () {
     }
     const frameIndex = filteredThread.stackTable.frame[stackIndex];
     const funcIndex = filteredThread.frameTable.func[frameIndex];
-    return filteredThread.funcTable.isJS[funcIndex];
+    return (filteredThread.funcTable.flags[funcIndex] & FuncFlag.IsJS) !== 0;
   }
 
   it('will return the same thread if filtering to "all"', function () {
@@ -970,7 +1016,57 @@ describe('funcHasDirectRecursiveCall and funcHasRecursiveCall', function () {
   });
 });
 
-describe('getSamplesSelectedStates', function () {
+describe('SampleRelations', function () {
+  // SampleRelations.fillBucket recovers a relation's fill bucket with a single
+  // mask rather than a lookup table, which only works as long as every
+  // SampleRelationToNode is laid out as its FillBucket plus flag bits above
+  // it. Pin that layout down here, so that adding a relation which breaks it
+  // fails loudly instead of silently drawing samples into the wrong fill.
+  const expectedBuckets: Array<[SampleRelationToNode, FillBucket]> = [
+    [SampleRelationToNode.FilteredOut, FillBucket.FilteredOutByTransform],
+    [SampleRelationToNode.TotalButNotSelf, FillBucket.Selected],
+    [SampleRelationToNode.TotalAndSelf, FillBucket.Selected],
+    [SampleRelationToNode.Before, FillBucket.UnselectedOrderedBeforeSelected],
+    [SampleRelationToNode.After, FillBucket.UnselectedOrderedAfterSelected],
+  ];
+
+  const relations = new SampleRelations(
+    new Uint8Array(expectedBuckets.map(([relation]) => relation))
+  );
+
+  it('maps every relation to the right fill bucket', function () {
+    expect(expectedBuckets.map((_, i) => relations.fillBucket(i))).toEqual(
+      expectedBuckets.map(([, bucket]) => bucket)
+    );
+  });
+
+  it('round-trips every relation through get', function () {
+    expect(relations.toArrayForTesting()).toEqual(
+      expectedBuckets.map(([relation]) => relation)
+    );
+    expect(expectedBuckets.map((_, i) => relations.get(i))).toEqual(
+      expectedBuckets.map(([relation]) => relation)
+    );
+  });
+
+  it('treats only FilteredOut as filtered out', function () {
+    expect(expectedBuckets.map((_, i) => relations.isFilteredOut(i))).toEqual([
+      true,
+      false,
+      false,
+      false,
+      false,
+    ]);
+  });
+
+  it('counts both self and non-self samples towards the total', function () {
+    expect(
+      expectedBuckets.map((_, i) => relations.contributesToTotal(i))
+    ).toEqual([false, true, true, false, false]);
+  });
+});
+
+describe('getSampleRelationsToNode', function () {
   function setup(textSamples: string) {
     const {
       derivedThreads,
@@ -1020,40 +1116,56 @@ describe('getSamplesSelectedStates', function () {
 
     it('determines the selection status of all the samples', function () {
       expect(
-        getSamplesSelectedStates(callNodeInfo, sampleCallNodes, A_B)
+        getSampleRelationsToNode(
+          callNodeInfo,
+          sampleCallNodes,
+          A_B
+        ).toArrayForTesting()
       ).toEqual([
-        'SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
+        SampleRelationToNode.TotalButNotSelf,
+        SampleRelationToNode.After,
+        SampleRelationToNode.TotalButNotSelf,
+        SampleRelationToNode.After,
+        SampleRelationToNode.After,
       ]);
       expect(
-        getSamplesSelectedStates(callNodeInfo, sampleCallNodes, A_D)
+        getSampleRelationsToNode(
+          callNodeInfo,
+          sampleCallNodes,
+          A_D
+        ).toArrayForTesting()
       ).toEqual([
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'SELECTED',
-        'SELECTED',
+        SampleRelationToNode.Before,
+        SampleRelationToNode.TotalButNotSelf,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.TotalButNotSelf,
+        SampleRelationToNode.TotalAndSelf,
       ]);
       expect(
-        getSamplesSelectedStates(callNodeInfo, sampleCallNodes, A_B_F)
+        getSampleRelationsToNode(
+          callNodeInfo,
+          sampleCallNodes,
+          A_B_F
+        ).toArrayForTesting()
       ).toEqual([
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
+        SampleRelationToNode.Before,
+        SampleRelationToNode.After,
+        SampleRelationToNode.TotalAndSelf,
+        SampleRelationToNode.After,
+        SampleRelationToNode.After,
       ]);
       expect(
-        getSamplesSelectedStates(callNodeInfo, sampleCallNodes, A_D_E)
+        getSampleRelationsToNode(
+          callNodeInfo,
+          sampleCallNodes,
+          A_D_E
+        ).toArrayForTesting()
       ).toEqual([
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
+        SampleRelationToNode.Before,
+        SampleRelationToNode.TotalAndSelf,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.After,
+        SampleRelationToNode.Before,
       ]);
     });
 
@@ -1116,41 +1228,53 @@ describe('getSamplesSelectedStates', function () {
       // Test B <- A <- ...
       // Only samples 2 and 6 have stacks ending in ... -> A -> B
       expect(
-        getSamplesSelectedStates(callNodeInfoInverted, sampleCallNodes, inBA)
+        getSampleRelationsToNode(
+          callNodeInfoInverted,
+          sampleCallNodes,
+          inBA
+        ).toArrayForTesting()
       ).toEqual([
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'SELECTED',
+        SampleRelationToNode.Before,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.TotalButNotSelf,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.After,
+        SampleRelationToNode.After,
+        SampleRelationToNode.TotalButNotSelf,
       ]);
       // Test C <- B <- A <- ...
       // Only sample 5 has a stack ending in ... -> A -> B -> C
       expect(
-        getSamplesSelectedStates(callNodeInfoInverted, sampleCallNodes, inCBA)
+        getSampleRelationsToNode(
+          callNodeInfoInverted,
+          sampleCallNodes,
+          inCBA
+        ).toArrayForTesting()
       ).toEqual([
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
+        SampleRelationToNode.Before,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.TotalButNotSelf,
+        SampleRelationToNode.Before,
       ]);
       // Test B <- ...
       // Only samples 2 and 6 have stacks ending in ... -> B
       expect(
-        getSamplesSelectedStates(callNodeInfoInverted, sampleCallNodes, inB)
+        getSampleRelationsToNode(
+          callNodeInfoInverted,
+          sampleCallNodes,
+          inB
+        ).toArrayForTesting()
       ).toEqual([
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'SELECTED',
-        'UNSELECTED_ORDERED_BEFORE_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'UNSELECTED_ORDERED_AFTER_SELECTED',
-        'SELECTED',
+        SampleRelationToNode.Before,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.TotalAndSelf,
+        SampleRelationToNode.Before,
+        SampleRelationToNode.After,
+        SampleRelationToNode.After,
+        SampleRelationToNode.TotalAndSelf,
       ]);
     });
 
@@ -1301,7 +1425,7 @@ describe('extractProfileFilterPageData', function () {
         {
           origin: 'about:blank',
           hostname: 'about:blank',
-          favicon: 'test-file-stub',
+          favicon: null,
         },
       ],
     ]);
@@ -1422,6 +1546,25 @@ describe('findAddressProofForFile', function () {
     );
     expect(missingAddressProof).toBeNull();
   });
+
+  it('finds an address for a file whose first frame has none', function () {
+    const { profile } = getProfileFromTextSamples(`
+      A[lib:XUL][file:a.cpp]
+      B[lib:XUL][file:a.cpp][address:20]
+    `);
+    const stringTable = StringTable.withBackingArray(
+      profile.shared.stringArray
+    );
+    const sourceIndex = profile.shared.sources.filename.indexOf(
+      stringTable.indexForString('a.cpp')
+    );
+
+    expect(findAddressProofForFile(profile, sourceIndex)).toEqual({
+      debugName: 'XUL',
+      breakpadId: 'SOMETHING_FAKE',
+      address: 0x20,
+    });
+  });
 });
 
 describe('calculateFunctionSizeLowerBound', function () {
@@ -1432,12 +1575,15 @@ describe('calculateFunctionSizeLowerBound', function () {
       some_function[lib:XUL][file:hello.cpp][line:622][address:1007][sym:symSomeFunc:1000:]
     `);
 
-    const thread = profile.threads[0];
+    const shared = profile.shared;
     const nativeSymbolsDict = nativeSymbolsDictPerThread[0];
     const nativeSymbolIndex = nativeSymbolsDict.symSomeFunc;
 
     const functionSizeLowerBound = calculateFunctionSizeLowerBound(
-      thread.frameTable,
+      computeFrameTableFromRawFrameTable(
+        shared.frameTable,
+        profile.meta.categories
+      ),
       0x1000,
       nativeSymbolIndex
     );
@@ -1473,22 +1619,23 @@ describe('getNativeSymbolsForCallNode', function () {
 
     // Both the call path [funA, funB] and the call path [funA, funB, funC] end
     // up at a call node with native symbol symB.
+    const callNodeFramePerStackAB = getCallNodeFramePerStack(
+      ensureExists(ab),
+      callNodeInfo,
+      thread.stackTable
+    );
     expect(
-      getNativeSymbolsForCallNode(
-        ensureExists(ab),
-        callNodeInfo,
-        thread.stackTable,
-        thread.frameTable
-      )
-    ).toEqual([symB]);
+      getNativeSymbolsForCallNode(callNodeFramePerStackAB, thread.frameTable)
+    ).toEqual(new Set([symB]));
+
+    const callNodeFramePerStackABC = getCallNodeFramePerStack(
+      ensureExists(abc),
+      callNodeInfo,
+      thread.stackTable
+    );
     expect(
-      getNativeSymbolsForCallNode(
-        ensureExists(abc),
-        callNodeInfo,
-        thread.stackTable,
-        thread.frameTable
-      )
-    ).toEqual([symB]);
+      getNativeSymbolsForCallNode(callNodeFramePerStackABC, thread.frameTable)
+    ).toEqual(new Set([symB]));
   });
 
   it('finds multiple symbols', function () {
@@ -1523,16 +1670,198 @@ describe('getNativeSymbolsForCallNode', function () {
     // is called by funB and one sample where it's called by funD. The call to
     // funC was inlined into each of those functions. So the call node has two
     // native symbols, B and D.
+    const callNodeFramePerStackC = getCallNodeFramePerStack(
+      ensureExists(c),
+      callNodeInfo,
+      thread.stackTable
+    );
     expect(
-      new Set(
-        getNativeSymbolsForCallNode(
-          ensureExists(c),
-          callNodeInfo,
-          thread.stackTable,
-          thread.frameTable
-        )
-      )
+      getNativeSymbolsForCallNode(callNodeFramePerStackC, thread.frameTable)
     ).toEqual(new Set([symB, symD]));
+  });
+});
+
+describe('getTotalNativeSymbolTimingsForCallNode', function () {
+  function getTimings(
+    thread: Thread,
+    callNodePath: CallNodePath,
+    defaultCategory: IndexIntoCategoryList,
+    isInverted: boolean
+  ): Map<IndexIntoNativeSymbolTable, number> {
+    const { stackTable, frameTable, funcTable, samples } = thread;
+    const nonInvertedCallNodeInfo = getCallNodeInfo(
+      stackTable,
+      frameTable,
+      defaultCategory
+    );
+    const callNodeInfo = isInverted
+      ? getInvertedCallNodeInfo(
+          nonInvertedCallNodeInfo,
+          defaultCategory,
+          funcTable.length
+        )
+      : nonInvertedCallNodeInfo;
+    const callNodeIndex = ensureExists(
+      callNodeInfo.getCallNodeIndexFromPath(callNodePath),
+      'invalid call node path'
+    );
+    const callNodeFramePerStack = getCallNodeFramePerStack(
+      callNodeIndex,
+      callNodeInfo,
+      stackTable
+    );
+    return getTotalNativeSymbolTimingsForCallNode(
+      samples,
+      callNodeFramePerStack,
+      frameTable
+    );
+  }
+
+  it('passes a basic test', function () {
+    const {
+      derivedThreads,
+      funcNamesDictPerThread,
+      nativeSymbolsDictPerThread,
+      defaultCategory,
+    } = getProfileFromTextSamples(`
+        A[lib:file][sym:Asym:20:]
+        B[lib:file][sym:Bsym:30:]
+      `);
+    const [{ A, B }] = funcNamesDictPerThread;
+    const [{ Asym, Bsym }] = nativeSymbolsDictPerThread;
+    const [thread] = derivedThreads;
+
+    // Compute the timings for the root call node.
+    // One total hit at symbol Asym.
+    const timingsRoot = getTimings(thread, [A], defaultCategory, false);
+    expect(timingsRoot.get(Asym)).toBe(1);
+    expect(timingsRoot.size).toBe(1); // no other hits
+
+    // Compute the timings for the child call node.
+    // One total hit at symbol Bsym.
+    const timingsChild = getTimings(thread, [A, B], defaultCategory, false);
+    expect(timingsChild.get(Bsym)).toBe(1);
+    expect(timingsChild.size).toBe(1); // no other hits
+  });
+
+  it('passes a basic test with recursion', function () {
+    const {
+      derivedThreads,
+      funcNamesDictPerThread,
+      nativeSymbolsDictPerThread,
+      defaultCategory,
+    } = getProfileFromTextSamples(`
+        A[lib:file][sym:Asym:20:]
+        B[lib:file][sym:Bsym:30:]
+        A[lib:file][sym:A2sym:40:]
+      `);
+
+    const [{ A, B }] = funcNamesDictPerThread;
+    const [{ Asym, A2sym }] = nativeSymbolsDictPerThread;
+    const [thread] = derivedThreads;
+
+    // Compute the timings for the root call node.
+    // One total hit at symbol Asym.
+    const timingsRoot = getTimings(thread, [A], defaultCategory, false);
+    expect(timingsRoot.get(Asym)).toBe(1);
+    expect(timingsRoot.size).toBe(1); // no other hits
+
+    // Compute the timings for the leaf call node.
+    // One total hit at symbol A2sym.
+    // In particular, we shouldn't record a hit for symbol Asym, even though
+    // the frame in Asym is also in A. But it's in the wrong call node.
+    const timingsChild = getTimings(thread, [A, B, A], defaultCategory, false);
+    expect(timingsChild.get(A2sym)).toBe(1);
+    expect(timingsChild.size).toBe(1); // no other hits
+  });
+
+  it('passes a test where the same function is called via different call paths', function () {
+    const {
+      derivedThreads,
+      funcNamesDictPerThread,
+      nativeSymbolsDictPerThread,
+      defaultCategory,
+    } = getProfileFromTextSamples(`
+        A[lib:one][sym:Asym:20:]  A[lib:one][sym:Asym:20:]   A[lib:one][sym:Asym:20:]
+        B[lib:one][sym:Bsym:30:]  D[lib:one][sym:Dsym:40:]   B[lib:one][sym:Bsym:30:]
+        C[lib:two][sym:Csym:10:]  C[lib:two][sym:C2sym:50:]  C[lib:two][sym:C3sym:60:]
+                                                             D[lib:one][sym:Dsym:40:]
+      `);
+
+    const [{ A, B, C }] = funcNamesDictPerThread;
+    const [{ Csym, C3sym }] = nativeSymbolsDictPerThread;
+    const [thread] = derivedThreads;
+
+    const timingsABC = getTimings(thread, [A, B, C], defaultCategory, false);
+    expect(timingsABC.get(Csym)).toBe(1);
+    expect(timingsABC.get(C3sym)).toBe(1);
+    expect(timingsABC.size).toBe(2); // no other hits
+  });
+
+  it('passes a test with an inverted thread', function () {
+    const {
+      derivedThreads,
+      funcNamesDictPerThread,
+      nativeSymbolsDictPerThread,
+      defaultCategory,
+    } = getProfileFromTextSamples(`
+        A[lib:one][sym:Asym:20:]  A[lib:one][sym:Asym:20:]   A[lib:one][sym:Asym:20:]
+        B[lib:one][sym:Bsym:30:]  D[lib:one][sym:Dsym:40:]   B[lib:one][sym:Bsym:30:]
+        D[lib:one][sym:Dsym:40:]  D[lib:one][sym:D2sym:50:]  C[lib:two][sym:Csym:10:]
+                                                             D[lib:one][sym:Dsym:40:]
+      `);
+
+    const [{ C, D }] = funcNamesDictPerThread;
+    const [{ Csym, Dsym, D2sym }] = nativeSymbolsDictPerThread;
+    const [thread] = derivedThreads;
+    // For the root D of the inverted tree, we have 3 native symbol hits.
+    const timingsD = getTimings(thread, [D], defaultCategory, true);
+    expect(timingsD.get(Dsym)).toBe(2);
+    expect(timingsD.get(D2sym)).toBe(1);
+    expect(timingsD.size).toBe(2); // no other hits
+
+    // For the C call node which is a child (direct caller) of D, we have
+    // one hit at symbol Csym.
+    const timingsDC = getTimings(thread, [D, C], defaultCategory, true);
+    expect(timingsDC.get(Csym)).toBe(1);
+    expect(timingsDC.size).toBe(1); // no other hits
+  });
+
+  it('passes a test where a function is present in two different native symbols', function () {
+    // The funky part here is that the targeted call node has frames from two different native
+    // symbols: Two from native symbol Bsym, and one from native symbol Asym. That's
+    // because B is present both as its own native symbol (separate outer function)
+    // and as an inlined call from A. In other words, C has been inlined both into
+    // a standalone B and also into another copy of B which was inlined into A.
+    //
+    // This means that, if the user double clicks call node [A, B, C], there are two
+    // different symbols for which we may want to display the assembly code, and we
+    // should compute how much time is spent in each.
+    const {
+      derivedThreads,
+      funcNamesDictPerThread,
+      nativeSymbolsDictPerThread,
+      defaultCategory,
+    } = getProfileFromTextSamples(`
+        A[lib:one][sym:Asym:20:]         A[lib:one][sym:Asym:20:]         A[lib:one][sym:Asym:20:]  A[lib:one][sym:Asym:20:]
+        B[lib:one][sym:Bsym:30:]         B[lib:one][sym:Asym:20:][inl:1]  B[lib:one][sym:Bsym:30:]  E[lib:one][sym:Esym:30:]
+        C[lib:one][sym:Bsym:30:][inl:1]  C[lib:one][sym:Asym:20:][inl:2]  C[lib:one][sym:Bsym:30:]
+                                                                          D[lib:one][sym:Dsym:40:]
+      `);
+
+    const [{ A, B, C }] = funcNamesDictPerThread;
+    const [{ Asym, Bsym }] = nativeSymbolsDictPerThread;
+    const [thread] = derivedThreads;
+
+    const timingsABCForBsym = getTimings(
+      thread,
+      [A, B, C],
+      defaultCategory,
+      false
+    );
+    expect(timingsABCForBsym.get(Asym)).toBe(1);
+    expect(timingsABCForBsym.get(Bsym)).toBe(2);
+    expect(timingsABCForBsym.size).toBe(2); // no other hits
   });
 });
 
@@ -1545,18 +1874,19 @@ describe('getNativeSymbolInfo', function () {
       other_function[lib:XUL][file:hello.cpp][line:622][address:2007][sym:symOtherFunc:2000:1e]
     `);
 
-    const { shared, threads } = profile;
-    const thread = threads[0];
+    const { shared } = profile;
     const stringTable = StringTable.withBackingArray(shared.stringArray);
     const { symSomeFunc, symOtherFunc } = nativeSymbolsDictPerThread[0];
+    const frameTable = computeFrameTableFromRawFrameTable(
+      shared.frameTable,
+      profile.meta.categories
+    );
+    const nativeSymbols = computeNativeSymbolTableFromRawNativeSymbolTable(
+      shared.nativeSymbols
+    );
 
     expect(
-      getNativeSymbolInfo(
-        symSomeFunc,
-        thread.nativeSymbols,
-        thread.frameTable,
-        stringTable
-      )
+      getNativeSymbolInfo(symSomeFunc, nativeSymbols, frameTable, stringTable)
     ).toEqual({
       name: 'symSomeFunc',
       address: 0x1000,
@@ -1565,12 +1895,7 @@ describe('getNativeSymbolInfo', function () {
       libIndex: profile.libs.findIndex((l) => l.name === 'XUL'),
     });
     expect(
-      getNativeSymbolInfo(
-        symOtherFunc,
-        thread.nativeSymbols,
-        thread.frameTable,
-        stringTable
-      )
+      getNativeSymbolInfo(symOtherFunc, nativeSymbols, frameTable, stringTable)
     ).toEqual({
       name: 'symOtherFunc',
       address: 0x2000,

@@ -229,7 +229,7 @@ class ServiceWorkerManagerImpl extends PureComponent<Props, State> {
         if (isLocalURL(profileUrl)) {
           return false;
         }
-      // otherwise, fall through.
+      // falls through
       case 'public':
       case 'compare':
       case 'local':
@@ -244,9 +244,10 @@ class ServiceWorkerManagerImpl extends PureComponent<Props, State> {
   override componentDidMount() {
     if (
       process.env.NODE_ENV === 'production' &&
+      process.env.ENABLE_SERVICE_WORKER !== 'false' &&
       // Do not install the service worker for l10n branch so localizers can see
       // the changes easily with a single refresh. This variable is added by
-      // webpack's DefinePlugin.
+      // esbuild's define option.
       !AVAILABLE_STAGING_LOCALES
     ) {
       this._installServiceWorker();

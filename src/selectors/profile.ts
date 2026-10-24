@@ -4,7 +4,10 @@
 import { createSelector } from 'reselect';
 import * as Tracks from '../profile-logic/tracks';
 import * as CPU from '../profile-logic/cpu';
+import * as CombinedCPU from '../profile-logic/combined-cpu';
 import * as UrlState from './url-state';
+import type { SliceTree } from '../utils/slice-tree';
+import { getSlices } from '../utils/slice-tree';
 import { ensureExists } from '../utils/types';
 import {
   accumulateCounterSamples,
@@ -13,20 +16,36 @@ import {
   getFriendlyThreadName,
   processCounter,
   getInclusiveSampleIndexRangeForSelection,
+  getSampleIndexRangeForSelection,
+  computeInnerWindowIDToTabMap,
   computeTabToThreadIndexesMap,
+  computeStackTableFromRawStackTable,
+  computeFrameTableFromRawFrameTable,
+  computeFuncTableFromRawFuncTable,
+  computeNativeSymbolTableFromRawNativeSymbolTable,
+  reserveFunctionsForCollapsedResources,
+  computeSamplesTableFromRawSamplesTable,
 } from '../profile-logic/profile-data';
 import type { IPCMarkerCorrelations } from '../profile-logic/marker-data';
-import { correlateIPCMarkers } from '../profile-logic/marker-data';
-import { markerSchemaFrontEndOnly } from '../profile-logic/marker-schema';
+import {
+  computeCombinedMarkerSchemaList,
+  computeMarkerSchemaByName,
+  correlateIPCMarkers,
+} from '../profile-logic/marker-data';
 import { getDefaultCategories } from 'firefox-profiler/profile-logic/data-structures';
 import * as CommittedRanges from '../profile-logic/committed-ranges';
 import { defaultTableViewOptions } from '../reducers/profile-view';
 import { StringTable } from '../utils/string-table';
+import { getSourcesWithSourceMapURL } from '../profile-logic/source-maps/matching';
+import type { EligibleSource } from '../profile-logic/source-maps/matching';
 import type { TabSlug } from '../app-logic/tabs-handling';
 
 import type {
   Profile,
   RawProfileSharedData,
+  StackTable,
+  FrameTable,
+  NativeSymbolTable,
   CategoryList,
   IndexIntoCategoryList,
   RawThread,
@@ -62,9 +81,11 @@ import type {
   State,
   ProfileViewState,
   SymbolicationStatus,
+  SourceMapSymbolicationStatus,
   MarkerSchema,
   MarkerSchemaByName,
   SampleUnits,
+  SamplesTable,
   IndexIntoSamplesTable,
   ExtraProfileInfoSection,
   TableViewOptions,
@@ -72,6 +93,10 @@ import type {
   SortedTabPageData,
   TimelineUnit,
   SourceTable,
+  FuncTableWithReservedFunctions,
+  IndexIntoResourceTable,
+  IndexIntoFuncTable,
+  FuncTable,
 } from 'firefox-profiler/types';
 
 import type { ThreadActivityScore } from '../profile-logic/tracks';
@@ -92,6 +117,9 @@ export const getProfileRootRange: Selector<StartEndRange> = (state) =>
   getProfileViewOptions(state).rootRange;
 export const getSymbolicationStatus: Selector<SymbolicationStatus> = (state) =>
   getProfileViewOptions(state).symbolicationStatus;
+export const getSourceMapSymbolicationStatus: Selector<
+  SourceMapSymbolicationStatus
+> = (state) => getProfileViewOptions(state).sourceMapSymbolicationStatus;
 export const getScrollToSelectionGeneration: Selector<number> = (state) =>
   getProfileViewOptions(state).scrollToSelectionGeneration;
 export const getFocusCallTreeGeneration: Selector<number> = (state) =>
@@ -185,6 +213,12 @@ export const getPageList = (state: State): PageList | null =>
   getProfile(state).pages || null;
 export const getDefaultCategory: Selector<IndexIntoCategoryList> = (state) =>
   getCategories(state).findIndex((c) => c.color === 'grey');
+export const getIdleCategoryIndex: Selector<IndexIntoCategoryList | null> = (
+  state
+) => {
+  const index = getCategories(state).findIndex((c) => c.name === 'Idle');
+  return index === -1 ? null : index;
+};
 export const getThreads: Selector<RawThread[]> = (state) =>
   getProfile(state).threads;
 export const getThreadNames: Selector<string[]> = (state) =>
@@ -248,6 +282,45 @@ export const getStringTable: Selector<StringTable> = createSelector(
   (stringArray) => StringTable.withBackingArray(stringArray as string[])
 );
 
+export const getFrameTable: Selector<FrameTable> = createSelector(
+  (state: State) => getRawProfileSharedData(state).frameTable,
+  getCategories,
+  computeFrameTableFromRawFrameTable
+);
+
+export const getNativeSymbolTable: Selector<NativeSymbolTable> = createSelector(
+  (state: State) => getRawProfileSharedData(state).nativeSymbols,
+  computeNativeSymbolTableFromRawNativeSymbolTable
+);
+
+export const getFuncTable: Selector<FuncTable> = createSelector(
+  (state: State) => getRawProfileSharedData(state).funcTable,
+  computeFuncTableFromRawFuncTable
+);
+
+export const getStackTable: Selector<StackTable> = createSelector(
+  (state: State) => getRawProfileSharedData(state).stackTable,
+  getFrameTable,
+  getCategories,
+  getDefaultCategory,
+  computeStackTableFromRawStackTable
+);
+
+export const getFuncTableWithReservedFunctions: Selector<FuncTableWithReservedFunctions> =
+  createSelector(
+    (state: State) => getRawProfileSharedData(state).funcTable,
+    (state: State) => getRawProfileSharedData(state).resourceTable,
+    reserveFunctionsForCollapsedResources
+  );
+
+export const getFunctionsReservedFuncTable: Selector<FuncTable> = (state) =>
+  getFuncTableWithReservedFunctions(state).funcTable;
+
+export const getReservedFunctionsForResources: Selector<
+  Map<IndexIntoResourceTable, IndexIntoFuncTable>
+> = (state) =>
+  getFuncTableWithReservedFunctions(state).reservedFunctionsForResources;
+
 export const getSourceTable: Selector<SourceTable> = (state: State) =>
   getRawProfileSharedData(state).sources;
 
@@ -255,26 +328,16 @@ export const getSourceTable: Selector<SourceTable> = (state: State) =>
 // to generate markers such as the Jank markers, and display them.
 export const getMarkerSchema: Selector<MarkerSchema[]> = createSelector(
   getMarkerSchemaGecko,
-  (geckoSchema) => {
-    const frontEndSchemaNames = new Set([
-      ...markerSchemaFrontEndOnly.map((schema) => schema.name),
-    ]);
-    return [
-      // Don't duplicate schema definitions that the front-end already has.
-      ...geckoSchema.filter((schema) => !frontEndSchemaNames.has(schema.name)),
-      ...markerSchemaFrontEndOnly,
-    ];
-  }
+  computeCombinedMarkerSchemaList
 );
 
 export const getMarkerSchemaByName: Selector<MarkerSchemaByName> =
-  createSelector(getMarkerSchema, (schemaList) => {
-    const result = Object.create(null);
-    for (const schema of schemaList) {
-      result[schema.name] = schema;
-    }
-    return result;
-  });
+  createSelector(getMarkerSchema, computeMarkerSchemaByName);
+
+export const getSourcesWithSourceMaps: Selector<EligibleSource[]> =
+  createSelector(getRawProfileSharedData, ({ sources, stringArray }) =>
+    getSourcesWithSourceMapURL(sources, stringArray)
+  );
 
 type CounterSelectors = ReturnType<typeof _createCounterSelectors>;
 
@@ -345,6 +408,23 @@ function _createCounterSelectors(counterIndex: CounterIndex) {
       )
   );
 
+  const getCommittedRangeCounterSampleSum: Selector<number> = createSelector(
+    getCounter,
+    getCommittedRange,
+    (counter, range) => {
+      const [begin, end] = getSampleIndexRangeForSelection(
+        counter.samples,
+        range.start,
+        range.end
+      );
+      let sum = 0;
+      for (let i = begin; i < end; i++) {
+        sum += counter.samples.count[i];
+      }
+      return sum;
+    }
+  );
+
   return {
     getCounter,
     getDescription,
@@ -353,6 +433,7 @@ function _createCounterSelectors(counterIndex: CounterIndex) {
     getMaxCounterSampleCountPerMs,
     getMaxRangeCounterSampleCountPerMs,
     getCommittedRangeCounterSampleRange,
+    getCommittedRangeCounterSampleSum,
   };
 }
 
@@ -387,19 +468,7 @@ export const getInnerWindowIDToPageMap: Selector<Map<
 export const getInnerWindowIDToTabMap: Selector<Map<
   InnerWindowID,
   TabID
-> | null> = createSelector(getPageList, (pages) => {
-  if (!pages) {
-    // Return null if there are no pages.
-    return null;
-  }
-
-  const innerWindowIDToTabMap: Map<InnerWindowID, TabID> = new Map();
-  for (const page of pages) {
-    innerWindowIDToTabMap.set(page.innerWindowID, page.tabID);
-  }
-
-  return innerWindowIDToTabMap;
-});
+> | null> = createSelector(getPageList, computeInnerWindowIDToTabMap);
 
 /**
  * Return a map of tab to thread indexes map. This is useful for learning which
@@ -519,10 +588,17 @@ export const getLocalTrackFromReference: DangerousSelectorWithArguments<
  */
 export const getProcessesWithMemoryTrack: Selector<Set<Pid>> = createSelector(
   getLocalTracksByPid,
-  (localTracksByPid) => {
+  getCounters,
+  (localTracksByPid, counters) => {
     const processesWithMemoryTrack = new Set<Pid>();
     for (const [pid, localTracks] of localTracksByPid.entries()) {
-      if (localTracks.some((track) => track.type === 'memory')) {
+      if (
+        localTracks.some(
+          (track) =>
+            track.type === 'counter' &&
+            ensureExists(counters)[track.counterIndex].category === 'Memory'
+        )
+      ) {
         processesWithMemoryTrack.add(pid);
       }
     }
@@ -575,7 +651,7 @@ export const getLocalTrackNamesByPid: Selector<Map<Pid, string[]>> =
     getRawProfileSharedData,
     getCounters,
     (localTracksByPid, threads, shared, counters) => {
-      const localTrackNamesByPid = new Map();
+      const localTrackNamesByPid = new Map<Pid, string[]>();
       for (const [pid, localTracks] of localTracksByPid) {
         localTrackNamesByPid.set(
           pid,
@@ -679,6 +755,140 @@ export const getThreadActivityScores: Selector<Array<ThreadActivityScore>> =
   );
 
 /**
+ * Get the CPU time in milliseconds for each thread.
+ * Returns an array of CPU times (one per thread), or null if no CPU delta
+ * information is available. This uses the raw sampleScore without boost factors.
+ */
+export const getThreadCPUTimeMs: Selector<Array<number> | null> =
+  createSelector(getProfile, (profile) => {
+    const { threads, meta } = profile;
+    const { sampleUnits } = meta;
+
+    if (!sampleUnits || !sampleUnits.threadCPUDelta) {
+      return null;
+    }
+
+    // Determine the conversion factor to milliseconds
+    let cpuDeltaToMs: number;
+    switch (sampleUnits.threadCPUDelta) {
+      case 'µs':
+        cpuDeltaToMs = 1 / 1000;
+        break;
+      case 'ns':
+        cpuDeltaToMs = 1 / 1000000;
+        break;
+      case 'variable CPU cycles':
+        // CPU cycles are not time units, return null
+        return null;
+      default:
+        return null;
+    }
+
+    return threads.map((thread) => {
+      const { threadCPUDelta } = thread.samples;
+      if (!threadCPUDelta) {
+        return 0;
+      }
+
+      // Ignore the first delta because it has no preceding sample interval.
+      const totalCPUDelta = threadCPUDelta
+        .slice(1)
+        .reduce<number>((accum, delta) => accum + (delta ?? 0), 0);
+      return totalCPUDelta * cpuDeltaToMs;
+    });
+  });
+
+/**
+ * Get SamplesTable for all threads in the profile.
+ * Returns an array of SamplesTable objects, one per thread.
+ */
+export const getAllThreadsSamplesTables: Selector<SamplesTable[]> =
+  createSelector(
+    getProfile,
+    getStackTable,
+    getSampleUnits,
+    getReferenceCPUDeltaPerMs,
+    getDefaultCategory,
+    (
+      profile,
+      stackTable,
+      sampleUnits,
+      referenceCPUDeltaPerMs,
+      defaultCategory
+    ) => {
+      return profile.threads.map((thread) =>
+        computeSamplesTableFromRawSamplesTable(
+          thread.samples,
+          stackTable,
+          sampleUnits,
+          referenceCPUDeltaPerMs,
+          defaultCategory
+        )
+      );
+    }
+  );
+
+/**
+ * Get combined CPU activity data from all threads.
+ * Returns combined time and CPU ratio arrays, or null if no CPU data is available.
+ */
+export const getCombinedThreadCPUData: Selector<CombinedCPU.CpuRatioTimeSeries | null> =
+  createSelector(getAllThreadsSamplesTables, (samplesTables) =>
+    CombinedCPU.combineCPUDataFromThreads(samplesTables)
+  );
+
+/**
+ * Get combined CPU activity data from all threads, filtered to the committed range.
+ * This respects zoom and shows only data within the current view.
+ */
+export const getRangeFilteredCombinedThreadCPUData: Selector<CombinedCPU.CpuRatioTimeSeries | null> =
+  createSelector(
+    getAllThreadsSamplesTables,
+    getCommittedRange,
+    (samplesTables, range) =>
+      CombinedCPU.combineCPUDataFromThreads(
+        samplesTables,
+        range.start,
+        range.end
+      )
+  );
+
+/**
+ * Get activity slices for the combined CPU usage across all threads.
+ * Returns hierarchical slices showing periods of high combined CPU activity,
+ * or null if no CPU data is available.
+ */
+export const getCombinedThreadActivitySlices: Selector<SliceTree | null> =
+  createSelector(getCombinedThreadCPUData, (combinedCPU) => {
+    if (combinedCPU === null || combinedCPU.maxCpuRatio === 0) {
+      return null;
+    }
+    const m = Math.ceil(combinedCPU.maxCpuRatio);
+    return getSlices(
+      [0.05 * m, 0.2 * m, 0.4 * m, 0.6 * m, 0.8 * m],
+      combinedCPU.cpuRatio,
+      combinedCPU.time
+    );
+  });
+
+/**
+ * Get activity slices for the combined CPU usage, filtered to the committed range.
+ * This respects zoom and shows only activity within the current view.
+ */
+export const getRangeFilteredCombinedThreadActivitySlices: Selector<SliceTree | null> =
+  createSelector(getRangeFilteredCombinedThreadCPUData, (combinedCPU) => {
+    if (combinedCPU === null || combinedCPU.maxCpuRatio === 0) {
+      return null;
+    }
+    const m = Math.ceil(combinedCPU.maxCpuRatio);
+    return getSlices(
+      [0.05 * m, 0.2 * m, 0.4 * m, 0.6 * m, 0.8 * m],
+      combinedCPU.cpuRatio,
+      combinedCPU.time
+    );
+  });
+
+/**
  * Get the pages array and construct a Map of pages that we can use to get the
  * relationships of tabs. The constructed map is `Map<TabID,Page[]>`.
  * The TabID we use in that map is the TabID of the topmost frame. That corresponds
@@ -749,7 +959,7 @@ export const getInnerWindowIDSetByTabID: Selector<Map<
     return null;
   }
 
-  const innerWindowIDSetByTabID = new Map();
+  const innerWindowIDSetByTabID = new Map<TabID, Set<InnerWindowID>>();
   for (const [tabID, pages] of pagesMap) {
     innerWindowIDSetByTabID.set(
       tabID,
@@ -765,7 +975,7 @@ export const getExtensionIdToNameMap: Selector<Map<string, string> | null> =
       return null;
     }
 
-    const extensionIDtoNameMap = new Map();
+    const extensionIDtoNameMap = new Map<string, string>();
     for (let i = 0; i < extensions.length; i++) {
       extensionIDtoNameMap.set(extensions.baseURL[i], extensions.name[i]);
     }
@@ -834,7 +1044,7 @@ export const getProfileFilterSortedPageData: Selector<SortedTabPageData> =
 export const getThreadIdToNameMap: Selector<Map<Tid, string>> = createSelector(
   getThreads,
   (threads) => {
-    const threadIdToNameMap = new Map();
+    const threadIdToNameMap = new Map<Tid, string>();
     for (const thread of threads) {
       threadIdToNameMap.set(thread.tid, getFriendlyThreadName(threads, thread));
     }
@@ -845,7 +1055,7 @@ export const getThreadIdToNameMap: Selector<Map<Tid, string>> = createSelector(
 export const getProcessIdToNameMap: Selector<Map<Pid, string>> = createSelector(
   getThreads,
   (threads) => {
-    const processIdToNameMap = new Map();
+    const processIdToNameMap = new Map<Pid, string>();
     for (const thread of threads) {
       if (!thread.isMainThread || !thread.pid) {
         continue;
@@ -881,6 +1091,21 @@ export const getContainsPrivateBrowsingInformation: Selector<boolean> =
 
     return hasPrivateThreads;
   });
+
+// Gets whether this profile contains argument values from JS execution tracing.
+// Gecko emits the `argumentValues` column even when it didn't trace anything, so
+// the values buffer and the object shapes are what tell us there is really
+// something here.
+export const getHasJSTracingArgumentValues: Selector<boolean> = createSelector(
+  getThreads,
+  (threads) =>
+    threads.some(
+      (thread) =>
+        thread.samples.argumentValues !== undefined &&
+        thread.tracedValuesBuffer !== undefined &&
+        thread.tracedObjectShapes !== undefined
+    )
+);
 
 /**
  * Returns the TIDs of the threads that are profiled.
@@ -927,15 +1152,22 @@ export const getSourceViewFile: Selector<string | null> = createSelector(
     }
 
     const fileNameStrIndex = sources.filename[sourceIndex];
-    return fileNameStrIndex !== null
+    return fileNameStrIndex !== null && fileNameStrIndex !== undefined
       ? stringTable.getString(fileNameStrIndex)
       : null;
   }
 );
 
-export const getSourceViewSourceUuid: Selector<string | null> = createSelector(
+export const getSourceViewSourceId: Selector<string | null> = createSelector(
   getSourceTable,
   UrlState.getSourceViewSourceIndex,
   (sources, sourceIndex) =>
-    sourceIndex !== null ? sources.uuid[sourceIndex] : null
+    sourceIndex !== null ? sources.id[sourceIndex] : null
+);
+
+export const getSourceViewStartLine: Selector<number> = createSelector(
+  getSourceTable,
+  UrlState.getSourceViewSourceIndex,
+  (sources, sourceIndex) =>
+    sourceIndex !== null ? sources.startLine[sourceIndex] : 1
 );

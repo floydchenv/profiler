@@ -11,7 +11,6 @@ import {
   getJsTracerFixed,
 } from '../../profile-logic/js-tracer';
 import { getEmptyProfile } from '../../profile-logic/data-structures';
-import { StringTable } from '../../utils/string-table';
 import { formatTree, addSourceToTable } from '../fixtures/utils';
 import {
   getProfileFromTextSamples,
@@ -20,6 +19,7 @@ import {
 } from '../fixtures/profiles/processed-profile';
 
 import type { Profile } from 'firefox-profiler/types';
+import { FuncFlag } from 'firefox-profiler/types';
 
 describe('jsTracerFixed', function () {
   function fixTiming(events: TestDefinedJsTracerEvent[]) {
@@ -129,16 +129,12 @@ describe('convertJsTracerToThread', function () {
     const profile = getEmptyProfile();
     profile.shared.stringArray = existingProfile.shared.stringArray;
     const jsTracer = ensureExists(existingThread.jsTracer);
-    const stringTable = StringTable.withBackingArray(
-      profile.shared.stringArray
-    );
     profile.threads = [
       convertJsTracerToThread(
         existingThread,
+        profile.shared,
         jsTracer,
-        categories,
-        stringTable,
-        profile.shared.sources
+        categories
       ),
     ];
     const { getState } = storeWithProfile(profile);
@@ -353,34 +349,44 @@ describe('selectors/getJsTracerTiming', function () {
         const foo = funcNamesDict['Foo.js'];
         const fooLine = 3;
         const fooColumn = 5;
-        thread.funcTable.lineNumber[foo] = fooLine;
-        thread.funcTable.columnNumber[foo] = fooColumn;
+        const { shared } = profile;
+        const jsFuncFlags =
+          FuncFlag.IsJS |
+          FuncFlag.HasLine |
+          FuncFlag.HasColumn |
+          FuncFlag.HasSource;
+
+        shared.funcTable.lineNumber[foo] = fooLine;
+        shared.funcTable.columnNumber[foo] = fooColumn;
         const fooUrlIndex = stringTable.indexForString('https://mozilla.org');
-        thread.funcTable.source[foo] = addSourceToTable(
-          profile.shared.sources,
+        shared.funcTable.source[foo] = addSourceToTable(
+          shared.sources,
           fooUrlIndex
         );
+        shared.funcTable.flags[foo] |= jsFuncFlags;
 
         const bar = funcNamesDict['Bar.js'];
         const barLine = 7;
         const barColumn = 11;
-        thread.funcTable.lineNumber[bar] = barLine;
-        thread.funcTable.columnNumber[bar] = barColumn;
+        shared.funcTable.lineNumber[bar] = barLine;
+        shared.funcTable.columnNumber[bar] = barColumn;
         const barUrlIndex = stringTable.indexForString('https://mozilla.org');
-        thread.funcTable.source[bar] = addSourceToTable(
-          profile.shared.sources,
+        shared.funcTable.source[bar] = addSourceToTable(
+          shared.sources,
           barUrlIndex
         );
+        shared.funcTable.flags[bar] |= jsFuncFlags;
 
         const baz = funcNamesDict['Baz.js'];
         // Use bar's line and column information.
-        thread.funcTable.lineNumber[baz] = barLine;
-        thread.funcTable.columnNumber[baz] = barColumn;
+        shared.funcTable.lineNumber[baz] = barLine;
+        shared.funcTable.columnNumber[baz] = barColumn;
         const bazUrlIndex = stringTable.indexForString('https://mozilla.org');
-        thread.funcTable.source[baz] = addSourceToTable(
-          profile.shared.sources,
+        shared.funcTable.source[baz] = addSourceToTable(
+          shared.sources,
           bazUrlIndex
         );
+        shared.funcTable.flags[baz] |= jsFuncFlags;
 
         // Manually update the JS tracer events to point to the right column numbers.
         jsTracer.line[2] = fooLine;

@@ -24,10 +24,25 @@ import type { ImplementationFilter } from './actions';
 
 /**
  * This type represents the filter types for the 'filter-samples' transform.
- * Currently the only filter type is 'marker-search', but in the future we may
- * add more types of filters.
+ *
+ * - 'marker-search': keep only samples whose timestamp falls within a matching marker range.
+ * - 'outside-marker': keep only samples whose timestamp falls OUTSIDE any matching marker range.
+ * - 'function-include': keep only samples whose stack contains any of the given functions
+ *   (encoded as comma-separated funcIndexes in the `filter` string).
+ * - 'stack-prefix': keep only samples whose stack starts with the given sequence of functions
+ *   (encoded as comma-separated funcIndexes, root-first).
+ * - 'stack-suffix': keep only samples whose leaf frame is the given function
+ *   (encoded as a single funcIndex).
+ *
+ * Note: 'outside-marker', 'function-include', 'stack-prefix', and 'stack-suffix' are used
+ * by the profiler-cli tool only and are not serialized to profile URLs.
  */
-export type FilterSamplesType = 'marker-search';
+export type FilterSamplesType =
+  | 'marker-search'
+  | 'outside-marker'
+  | 'function-include'
+  | 'stack-prefix'
+  | 'stack-suffix';
 
 /*
  * Define all of the transforms on an object to conveniently access mapped types and do
@@ -125,6 +140,43 @@ export type TransformDefinitions = {
   'focus-function': {
     readonly type: 'focus-function';
     readonly funcIndex: IndexIntoFuncTable;
+  };
+
+  /**
+   * The FocusSelf transform focuses on the self time of a specific function by filtering
+   * out samples where the function is not executing its own code (after implementation
+   * filtering). Unlike focus-function which keeps callees, focus-self removes them to
+   * highlight where within the function time is spent.
+   *
+   * This transform is especially useful when combined with an implementation filter.
+   * For example, when focusing on a JS function with implementation='js', the combined
+   * call tree will show native functions that contributed to the JS function's "JS self
+   * time".
+   *
+   * Example with implementation='js', focusing on X.js:
+   *
+   *            A.js:4,0                                           X.js:3,1
+   *           /       \                                          /       \
+   *          v         v            Focus-self X.js with        v         v
+   *   X.js:1,0       B.js:3,0        implementation='js'   Y.cpp:1,0   W.cpp:1,0
+   *      |            /     \                ->                |           |
+   *      v           v       v                                 v           v
+   *   Y.cpp:1,0   X.js:2,1   C.cpp,1,1                     Z.cpp:1,1   Q.cpp:1,1
+   *      |           |
+   *      v           v
+   *   Z.cpp:1,1   W.cpp:1,0
+   *                  |
+   *                  v
+   *               Q.cpp:1,1
+   *
+   * If the focused function is recursive, every instance of it becomes a root. In other
+   * words, recursion is collapsed and you see the self time for the "innermost" instance
+   * of the focused function in a stack.
+   */
+  'focus-self': {
+    readonly type: 'focus-self';
+    readonly funcIndex: IndexIntoFuncTable;
+    readonly implementation: ImplementationFilter;
   };
 
   /**
@@ -332,13 +384,11 @@ export type TransformDefinitions = {
   };
 
   /**
-   * Filter the samples in the thread by the filter.
-   * Currently it only supports filtering by the marker name but can be extended
-   * to support more filters in the future.
+   * Filter the samples in the thread by the filter. See FilterSamplesType for
+   * the supported filter types.
    */
   'filter-samples': {
     readonly type: 'filter-samples';
-    // Expand this type when you need to support more than just the marker.
     readonly filterType: FilterSamplesType;
     readonly filter: string;
   };

@@ -21,6 +21,16 @@ AppHeader--app-header = <header>{ -profiler-brand-name }</header> — <subheader
 AppHeader--github-icon =
     .title = Va tal nestri dipuesit Git (il colegament al vignarà viert intun gnûf barcon)
 
+## ThemeToggle
+## They are used at the top right side of the home page to switch between themes.
+
+ThemeToggle--system =
+    .title = Va daûr des preferencis dal teme di sisteme
+ThemeToggle--light =
+    .title = Dopre teme clâr
+ThemeToggle--dark =
+    .title = Dopre teme scûr
+
 ## AppViewRouter
 ## This is used for displaying errors when loading the application.
 
@@ -41,6 +51,14 @@ AppViewRouter--error-from-localhost-url-safari =
     .title = Safari nol rive a impuartâ i profîi locâi
 AppViewRouter--route-not-found--home =
     .specialMessage = L’URL che tu âs cirût di contatâ nol è stât ricognossût.
+
+## Backtrace
+## This is used to display a backtrace (call stack) for a marker or sample.
+
+# Variables:
+#   $function (String) - Name of the function that was inlined.
+Backtrace--inlining-badge = (incorporade)
+    .title = Il compiladôr al veve incorporade la funzion { $function } in chel che le clamave.
 
 ## CallNodeContextMenu
 ## This is used as a context menu for the Call Tree, Flame Graph and Stack Chart
@@ -69,6 +87,9 @@ CallNodeContextMenu--transform-focus-function = Concentrazion su funzion
     .title = { CallNodeContextMenu--transform-focus-function-title }
 CallNodeContextMenu--transform-focus-function-inverted = Concentrazion su funzion (invertide)
     .title = { CallNodeContextMenu--transform-focus-function-title }
+
+##
+
 CallNodeContextMenu--transform-focus-subtree = Concentrazion dome su sot-arbul
     .title =
         La concentrazion suntun sot-arbul e gjavara ducj i campions che no includin chê
@@ -246,16 +267,17 @@ ErrorBoundary--report-error-to-developers-description =
 # This is used in a call to action button, displayed inside the error box.
 ErrorBoundary--report-error-on-github = Segnale l’erôr su GitHub
 
-## Footer Links
+## Settings Menu
+## The settings popup opened from the cog icon in the top bar.
 
-FooterLinks--legal = Notis legâls
-FooterLinks--Privacy = Riservatece
-FooterLinks--Cookies = Cookies
-FooterLinks--languageSwitcher--select =
+SettingsMenu--button =
+    .title = Impostazions
+SettingsMenu--docs = Documentazion
+SettingsMenu--legal = Notis legâls
+SettingsMenu--privacy = Riservatece
+SettingsMenu--cookies = Cookies
+SettingsMenu--language-switcher =
     .title = Cambie lenghe
-FooterLinks--hide-button =
-    .title = Plate colegaments da pît de pagjine
-    .aria-label = Plate colegaments da pît de pagjine
 
 ## FullTimeline
 ## The timeline component of the full view in the analysis UI at the top of the
@@ -293,7 +315,6 @@ Home--enable-button-unavailable =
 # This message can be seen on https://main--perf-html.netlify.app/ .
 Home--web-channel-unavailable = Cheste istance dal profiladôr no je rivade a conetisi al WebChannel. Di solit al significhe che e je in esecuzion suntun host diviers di chel indicât te impostazion <code>devtools.performance.recording.ui-base-url</code>. Se tu vuelis caturâ gnûfs profîi cun cheste istance e dâur il control programatic dal boton dal menù dal profiladôr, vierç <code>about:config</code> e modifiche cheste impostazion.
 Home--record-instructions = Par inviâ la profilazion, fâs clic sul boton par scomençâ la regjistrazion opûr dopre lis scurtis di tastiere. La icone e devente blu se e je ative la regjistrazion di un profîl. Frache <kbd>Cature</kbd> par cjariâ i dâts su profiler.firefox.com.
-Home--instructions-content = La regjistrazion dai profîi e je pussibile dome cun <a>{ -firefox-brand-name }</a>. Al è pussibil visualizâ i profîi esistents cun cualsisei navigadôr moderni.
 Home--record-instructions-start-stop = Interomp e invie la profiladure
 Home--record-instructions-capture-load = Cature e cjame profîl
 Home--profiler-motto = Cature un profîl des prestazions. Analizilu. Condividilu. Rint il Web plui svelt.
@@ -301,6 +322,7 @@ Home--additional-content-title = Cjame profîi esistents
 Home--additional-content-content = Tu puedis <strong>strissinâ e molâ</strong> achì un profîl par cjariâlu, opûr:
 Home--compare-recordings-info = Tu puedis ancje paragonâ diviersis regjistrazions. <a>Vierç la interface pal confront</a>.
 Home--your-recent-uploaded-recordings-title = Lis tôs regjistrazions cjariadis in rêt di resint
+Home--dark-mode-title = Modalitât scure
 # We replace the elements such as <perf> and <simpleperf> with links to the
 # documentation to use these tools.
 Home--load-files-from-other-tools2 =
@@ -311,12 +333,6 @@ Home--chrome-extension-instructions =
     Dopre la estension <a>{ -profiler-brand-name } par Chrome</a>
     par tirâ dongje i profîi des prestazions in Chrome e analizâju in { -profiler-brand-name }. Instale la estension dal Chrome Web Store.
 Home--chrome-extension-recording-instructions = Une volte instalade, dopre la icone de estension te sbare dai struments o lis scurtis par inviâe interompi la profilazion. Tu puedis ancje espuartâ i profîi e cjariâju achì par fâ une analisi detaiade.
-
-## IdleSearchField
-## The component that is used for all the search inputs in the application.
-
-IdleSearchField--search-input =
-    .placeholder = Inserìs i tiermins di cirî
 
 ## JsTracerSettings
 ## JSTracer is an experimental feature and it's currently disabled. See Bug 1565788.
@@ -393,6 +409,8 @@ MarkerSettings--panel-search =
     .title = Visualize dome marcadôrs che a corispuindin a un ciert non
 MarkerSettings--marker-filters =
     .title = Filtris pai marcadôrs
+MarkerSettings--copy-table =
+    .title = Copie tabele come test
 
 ## MarkerSidebar
 ## This is the sidebar component that is used in Marker Table panel.
@@ -407,6 +425,16 @@ MarkerTable--duration = Durade
 MarkerTable--name = Non
 MarkerTable--details = Detais
 
+## MarkerTooltip
+## This is the component for Marker Tooltip panel.
+
+# This is used as the tooltip for the filter button in marker tooltips.
+# Variables:
+#   $filter (String) - Search string that will be used to filter the markers.
+MarkerTooltip--filter-button-tooltip =
+    .aria-label = Mostre nome i marcadôrs che a corispuindin a: “{ $filter }”
+    .title = Mostre nome i marcadôrs che a corispuindin a: “{ $filter }”
+
 ## MenuButtons
 ## These strings are used for the buttons at the top of the profile viewer.
 
@@ -414,14 +442,9 @@ MenuButtons--index--metaInfo-button =
     .label = Informazions profîl
 MenuButtons--index--full-view = Viodude complete
 MenuButtons--index--cancel-upload = Anule cjariament in rêt
-MenuButtons--index--share-upload =
-    .label = Cjame in rêt il profîl locâl
-MenuButtons--index--share-re-upload =
-    .label = Torne cjame in rêt
 MenuButtons--index--share-error-uploading =
     .label = Erôr tal cjariâ in rêt
 MenuButtons--index--revert = Ripristine al profîl origjinâl
-MenuButtons--index--docs = Documentazion
 MenuButtons--permalink--button =
     .label = Colegament permanent
 
@@ -483,6 +506,8 @@ MenuButtons--metaInfo--profiling-started = Regjistrazion scomençade:
 MenuButtons--metaInfo--profiling-session = Lungjece regjistrazion:
 MenuButtons--metaInfo--main-process-started = Procès principâl inviât:
 MenuButtons--metaInfo--main-process-ended = Procès principâl completât:
+MenuButtons--metaInfo--file-name = Non dal file:
+MenuButtons--metaInfo--file-size = Dimension dal file:
 MenuButtons--metaInfo--interval = Interval:
 MenuButtons--metaInfo--buffer-capacity = Capacitât buffer:
 MenuButtons--metaInfo--buffer-duration = Durade buffer:
@@ -498,7 +523,8 @@ MenuButtons--metaInfo--buffer-duration-seconds =
 MenuButtons--metaInfo--buffer-duration-unlimited = Ilimitade
 MenuButtons--metaInfo--application = Aplicazion
 MenuButtons--metaInfo--name-and-version = Non e version:
-MenuButtons--metaInfo--application-uptime = Timp di ativitât:
+# The time between application startup and when the profiler was started
+MenuButtons--metaInfo--application-uptime2 = Timp di ativitât:
 MenuButtons--metaInfo--update-channel = Canâl di inzornament:
 MenuButtons--metaInfo--build-id = ID compilazion:
 MenuButtons--metaInfo--build-type = Gjenar di compilazion:
@@ -561,7 +587,6 @@ MenuButtons--publish--renderCheckbox-label-preference = Inclût valôrs des impo
 MenuButtons--publish--renderCheckbox-label-private-browsing = Inclût i dâts dai barcons di navigazion privade
 MenuButtons--publish--renderCheckbox-label-private-browsing-warning-image =
     .title = Chest profîl al conten dâts di navigazion privade
-MenuButtons--publish--reupload-performance-profile = Torne cjame in rêt il profîl des prestazions
 MenuButtons--publish--share-performance-profile = Condivît il profîl des prestazions
 MenuButtons--publish--info-description = Cjame in rêt il to profîl e rindilu acessibil a ducj cul colegament.
 MenuButtons--publish--info-description-default = Par impostazion predefinide, i tiei dâts personâi a vegnin gjavâts.
@@ -572,7 +597,6 @@ MenuButtons--publish--upload-title = Daûr a cjariâ in rêt il profîl…
 MenuButtons--publish--cancel-upload = Anule cjariament in rêt
 MenuButtons--publish--message-something-went-wrong = Orpo, alc al è lât strucj dilunc il cjariament in rêt dal profîl.
 MenuButtons--publish--message-try-again = Torne prove
-MenuButtons--publish--download = Discjame
 MenuButtons--publish--compressing = Daûr a comprimi…
 MenuButtons--publish--error-while-compressing = Erôr dilunc la compression, prove a deselezionâ cualchi casele di control par ridusi lis dimensions dal profîl.
 
@@ -607,8 +631,8 @@ PanelSearch--search-field-hint = Savevistu che tu puedis doprâ la virgule (,) p
 ProfileName--edit-profile-name-button =
     .title = Modifiche il non dal profîl
 ProfileName--edit-profile-name-input =
-    .title = Modifiche il non dal profîl
     .aria-label = Non dal profîl
+    .title = Modifiche il non dal profîl
 
 ## Profile Delete Button
 
@@ -684,8 +708,8 @@ ServiceWorkerManager--installed-button = Torne cjame la aplicazion
 ServiceWorkerManager--updated-while-not-ready = E je stade aplicade une gnove version de aplicazion prime che cheste pagjine e fossi cjariade dal dut. Al è pussibil che tu viodedis malfunzionaments.
 ServiceWorkerManager--new-version-is-ready = E je stade aplicade une gnove version de aplicazion e e je pronte pal ûs.
 ServiceWorkerManager--hide-notice-button =
-    .title = Plate l’avîs di gnûf cjariament
     .aria-label = Plate l’avîs di gnûf cjariament
+    .title = Plate l’avîs di gnûf cjariament
 
 ## StackSettings
 ## This is the settings component that is used in Call Tree, Flame Graph and Stack
@@ -780,9 +804,26 @@ TrackNameButton--hide-process =
 ## the UI. To learn more about it, visit:
 ## https://profiler.firefox.com/docs/#/./memory-allocations?id=memory-track
 
-TrackMemoryGraph--relative-memory-at-this-time = memorie relative in chest moment
-TrackMemoryGraph--memory-range-in-graph = interval di memorie tal grafic
-TrackMemoryGraph--allocations-and-deallocations-since-the-previous-sample = assegnazions e rimozions di assegnazion dal campion precedent
+# Variables:
+#   $value (String) - the relative memory at this time (e.g. "5MB")
+TrackMemoryGraph--relative-memory-at-this-time2 = { $value }
+    .label = memorie relative a chest pont
+# Variables:
+#   $value (String) - the memory range across the graph (e.g. "5MB")
+TrackMemoryGraph--memory-range-in-graph2 = { $value }
+    .label = interval di memorie tal grafic
+# Variables:
+#   $value (String) - count of allocations and deallocations since the previous sample
+TrackMemoryGraph--allocations-and-deallocations-since-the-previous-sample2 = { $value }
+    .label = assegnazion e disassegnazion dal campion di prime
+
+## TrackProcessCPUGraph
+## This is used to show the CPU usage of a process over time in the timeline.
+
+# Variables:
+#   $value (String) - the CPU usage at this sample (e.g. "50%")
+TrackProcessCPUGraph--cpu = { $value }
+    .label = CPU
 
 ## TrackPower
 ## This is used to show the power used by the CPU and other chips in a computer,
@@ -809,6 +850,11 @@ TrackPower--tooltip-power-watt = { $value } W
 #   $value (String) - the power value at this location
 TrackPower--tooltip-power-milliwatt = { $value } mW
     .label = Consum
+# This is used in the tooltip when the instant power value uses the microwatt unit.
+# Variables:
+#   $value (String) - the power value at this location
+TrackPower--tooltip-power-microwatt = { $value } μW
+    .label = Consum
 # This is used in the tooltip when the power value uses the kilowatt unit.
 # Variables:
 #   $value (String) - the power value at this location
@@ -824,6 +870,11 @@ TrackPower--tooltip-average-power-watt = { $value } W
 #   $value (String) - the power value at this location
 TrackPower--tooltip-average-power-milliwatt = { $value } mW
     .label = Consum medi te selezion atuâl
+# This is used in the tooltip when the power value uses the microwatt unit.
+# Variables:
+#   $value (String) - the power value at this location
+TrackPower--tooltip-average-power-microwatt = { $value } μW
+    .label = Consum medi te selezion corinte
 # This is used in the tooltip when the energy used in the current range uses the
 # kilowatt-hour unit.
 # Variables:
@@ -1029,6 +1080,12 @@ BottomBox--assembly-code-not-available-title = Codiç in assembler no disponibil
 # Elements:
 #   <a>link text</a> - A link to the github issue about supported scenarios.
 BottomBox--assembly-code-not-available-text = Viôt il <a>probleme #4520</a> pai senaris supuartâts e i mioraments planificâts.
+# The toggle button for making the bottom box fullscreen.
+BottomBox--hide-fullscreen =
+    .title = Jes dal plen visôr
+# The toggle button for making the bottom box fullscreen.
+BottomBox--show-fullscreen =
+    .title = Plen visôr
 SourceView--close-button =
     .title = Siere la viodude sorzint
 
@@ -1103,6 +1160,17 @@ AssemblyView--show-button =
 # Assembly refers to the low-level programming language.
 AssemblyView--hide-button =
     .title = Plate la viodude assembly
+# The "◀" button above the assembly view.
+AssemblyView--prev-button =
+    .title = Prime
+# The "▶" button above the assembly view.
+AssemblyView--next-button =
+    .title = Sucessîf
+# The label showing the current position and total count above the assembly view.
+# Variables:
+#   $current (Number) - The current position (1-indexed).
+#   $total (Number) - The total count.
+AssemblyView--position-label = { $current } di { $total }
 
 ## UploadedRecordingsHome
 ## This is the page that displays all the profiles that user has uploaded.

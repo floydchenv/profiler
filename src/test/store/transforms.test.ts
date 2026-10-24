@@ -25,6 +25,8 @@ import {
   changeSelectedCallNode,
   changeCallTreeSummaryStrategy,
 } from '../../actions/profile-view';
+import * as AppActions from '../../actions/app';
+import * as UrlStateSelectors from '../../selectors/url-state';
 import { selectedThreadSelectors } from '../../selectors/per-thread';
 
 describe('"focus-subtree" transform', function () {
@@ -621,6 +623,150 @@ describe('"focus-function" transform', function () {
   });
 });
 
+describe('"focus-self" transform', function () {
+  describe('on a call tree', function () {
+    /**
+     * Assert this transformation with implementation='combined':
+     *
+     * Samples: A->X, A->B->X, A->B->X->Y
+     *
+     * - First sample (A->X): innermost filtered frame is X, keep it → X (with self)
+     * - Second sample (A->B->X): innermost filtered frame is X, keep it → X (with self)
+     * - Third sample (A->B->X->Y): innermost filtered frame is Y ≠ X, drop it
+     *
+     * Result:
+     *   X:2,2 (self time from the two kept samples)
+     */
+    const {
+      profile,
+      funcNamesPerThread: [funcNames],
+    } = getProfileFromTextSamples(`
+      A  A  A
+      X  B  B
+         X  X
+            Y
+    `);
+
+    const threadIndex = 0;
+    const X = funcNames.indexOf('X');
+
+    it('starts as an unfiltered call tree', function () {
+      const { getState } = storeWithProfile(profile);
+      expect(
+        formatTree(selectedThreadSelectors.getCallTree(getState()))
+      ).toEqual([
+        '- A (total: 3, self: —)',
+        '  - B (total: 2, self: —)',
+        '    - X (total: 2, self: 1)',
+        '      - Y (total: 1, self: 1)',
+        '  - X (total: 1, self: 1)',
+      ]);
+    });
+
+    it('can focus-self on a function', function () {
+      const { dispatch, getState } = storeWithProfile(profile);
+      dispatch(
+        addTransformToStack(threadIndex, {
+          type: 'focus-self',
+          funcIndex: X,
+          implementation: 'combined',
+        })
+      );
+      expect(
+        formatTree(selectedThreadSelectors.getCallTree(getState()))
+      ).toEqual(['- X (total: 2, self: 2)']);
+    });
+  });
+
+  describe('with implementation filter and descendants', function () {
+    /**
+     * Test that non-filtered frames are kept as descendants to show where self time goes.
+     *
+     * Samples:
+     *   A.js -> X.js -> Y.cpp -> Z.cpp  (3 samples)
+     *
+     * With implementation='js':
+     * - Implementation-filtered view shows: A.js -> X.js
+     * - Innermost filtered frame is X.js
+     * - X.js == focused function ✓
+     * - Keep it, result: X.js -> Y.cpp -> Z.cpp
+     *   (Y.cpp and Z.cpp are kept to show where X's JS self time goes)
+     */
+    const {
+      profile,
+      funcNamesPerThread: [funcNames],
+    } = getProfileFromTextSamples(`
+      A.js    A.js    A.js
+      X.js    X.js    X.js
+      Y.cpp   Y.cpp   Y.cpp
+      Z.cpp   Z.cpp   Z.cpp
+    `);
+
+    const threadIndex = 0;
+    const X = funcNames.indexOf('X.js');
+
+    it('keeps non-filtered descendants to show where self time goes', function () {
+      const { dispatch, getState } = storeWithProfile(profile);
+      dispatch(
+        addTransformToStack(threadIndex, {
+          type: 'focus-self',
+          funcIndex: X,
+          implementation: 'js',
+        })
+      );
+      expect(
+        formatTree(selectedThreadSelectors.getCallTree(getState()))
+      ).toEqual([
+        '- X.js (total: 3, self: —)',
+        '  - Y.cpp (total: 3, self: —)',
+        '    - Z.cpp (total: 3, self: 3)',
+      ]);
+    });
+  });
+
+  describe('with recursion', function () {
+    /**
+     * Test that recursion is handled correctly.
+     *
+     * Samples: A->X->Y->X, A->X->Y->X, A->X->Y->X
+     *
+     * For each sample A->X->Y->X:
+     * - Innermost filtered frame is the second X
+     * - Second X == focused function ✓
+     * - Keep it, and make the innermost X the root
+     *
+     * Result:
+     *   X:3,3 (the innermost X instances, all with self time)
+     */
+    const {
+      profile,
+      funcNamesPerThread: [funcNames],
+    } = getProfileFromTextSamples(`
+      A  A  A
+      X  X  X
+      Y  Y  Y
+      X  X  X
+    `);
+
+    const threadIndex = 0;
+    const X = funcNames.indexOf('X');
+
+    it('handles recursion correctly', function () {
+      const { dispatch, getState } = storeWithProfile(profile);
+      dispatch(
+        addTransformToStack(threadIndex, {
+          type: 'focus-self',
+          funcIndex: X,
+          implementation: 'combined',
+        })
+      );
+      expect(
+        formatTree(selectedThreadSelectors.getCallTree(getState()))
+      ).toEqual(['- X (total: 3, self: 3)']);
+    });
+  });
+});
+
 describe('"focus-category" transform', function () {
   function setup(textSamples: string) {
     const {
@@ -819,6 +965,70 @@ describe('"focus-category" transform', function () {
       expect(selectedCallNodePath).toEqual([A, A]);
     });
   });
+
+  describe('browser back button behavior', function () {
+    // This test ensures that when using browser back button after applying
+    // a focus-category transform, re-applying the transform doesn't fail.
+    // The bug occurred because expanded paths from the transformed tree
+    // weren't being reset when the URL state changed via browser navigation.
+    const { threadIndex, categoryIndex, funcNamesDict, getState, dispatch } =
+      setup(`
+        A[cat:Other]  A[cat:Other]
+        B[cat:Other]  B[cat:Other]
+        C[cat:Graphics]  C[cat:Graphics]
+        D[cat:Graphics]  D[cat:Graphics]
+        E[cat:Graphics]  F[cat:Graphics]
+      `);
+
+    it('can re-apply transform after browser back without error', function () {
+      const { C, D, E } = funcNamesDict;
+
+      // Apply focus-category transform.
+      dispatch(
+        addTransformToStack(threadIndex, {
+          type: 'focus-category',
+          category: categoryIndex,
+        })
+      );
+
+      // Select a deep node in the transformed tree, which expands paths.
+      // In the transformed tree, C becomes a root since A and B are filtered out.
+      dispatch(changeSelectedCallNode(threadIndex, [C, D, E]));
+
+      expect(
+        selectedThreadSelectors.getSelectedCallNodePath(getState())
+      ).toEqual([C, D, E]);
+
+      // Capture the current URL state with transforms.
+      const urlStateWithTransforms = UrlStateSelectors.getUrlState(getState());
+
+      // Simulate browser back button by creating a URL state without transforms.
+      const urlStateWithoutTransforms = {
+        ...urlStateWithTransforms,
+        profileSpecific: {
+          ...urlStateWithTransforms.profileSpecific,
+          transforms: {},
+        },
+      };
+
+      // Apply the URL state change (simulating browser back).
+      dispatch(AppActions.updateUrlState(urlStateWithoutTransforms));
+
+      // Re-apply the same transform. This should not throw an error.
+      expect(() => {
+        dispatch(
+          addTransformToStack(threadIndex, {
+            type: 'focus-category',
+            category: categoryIndex,
+          })
+        );
+      }).not.toThrow();
+
+      expect(
+        selectedThreadSelectors.getSelectedCallNodePath(getState())
+      ).toEqual([]);
+    });
+  });
 });
 
 describe('"collapse-resource" transform', function () {
@@ -848,9 +1058,8 @@ describe('"collapse-resource" transform', function () {
     `);
     const collapsedFuncNames = [...funcNames, 'firefox'];
     const threadIndex = 0;
-    const thread = profile.threads[threadIndex];
     const firefoxNameIndex = stringTable.indexForString('firefox');
-    const firefoxResourceIndex = thread.resourceTable.name.findIndex(
+    const firefoxResourceIndex = profile.shared.resourceTable.name.findIndex(
       (stringIndex) => stringIndex === firefoxNameIndex
     );
     if (firefoxResourceIndex === -1) {
@@ -920,15 +1129,15 @@ describe('"collapse-resource" transform', function () {
      *              /     \                                        |
      *             v       v               Collapse firefox        v
      *   B.cpp:firefox    H.cpp:firefox         ->              firefox
-     *        |                 |                                  |
-     *        v                 v                                  v
-     *       C.js              I.js                              F.cpp
-     *        |                                                    |
-     *        v                                                    v
-     *   D.cpp:firefox                                           G.js
-     *        |
-     *        v
-     *       E.js
+     *        |                 |                                /   \
+     *        v                 v                               v     v
+     *       C.js              I.js                          E.js    I.js
+     *        |                                               |
+     *        v                                               v
+     *   D.cpp:firefox                                      F.cpp
+     *        |                                               |
+     *        v                                               v
+     *       E.js                                            G.js
      *        |
      *        v
      *      F.cpp
@@ -936,11 +1145,8 @@ describe('"collapse-resource" transform', function () {
      *        v
      *      G.js
      *
-     * This behavior may seem a bit surprising, but any stack that doesn't match the
-     * current implementation AND has a callee that is collapsed, will itself be collapsed.
-     * It may be obvious to collapse C.js in this case, as it's between two different
-     * firefox library stacks, but E.js and I.js will be collapsed as well. The only
-     * retained leaf "js" stack is G.js, because it follows a non-collapsed "cpp" stack.
+     * In this example, C.js is collapsed into the firefox resource because it is between
+     * two firefox library nodes and it does not match the implementation filter.
      */
     const {
       profile,
@@ -957,9 +1163,8 @@ describe('"collapse-resource" transform', function () {
     `);
     const collapsedFuncNames = [...funcNames, 'firefox'];
     const threadIndex = 0;
-    const thread = profile.threads[threadIndex];
     const firefoxNameIndex = stringTable.indexForString('firefox');
-    const firefoxResourceIndex = thread.resourceTable.name.findIndex(
+    const firefoxResourceIndex = profile.shared.resourceTable.name.findIndex(
       (stringIndex) => stringIndex === firefoxNameIndex
     );
     if (firefoxResourceIndex === -1) {
@@ -968,7 +1173,7 @@ describe('"collapse-resource" transform', function () {
     const collapseTransform = {
       type: 'collapse-resource' as const,
       resourceIndex: firefoxResourceIndex,
-      collapsedFuncIndex: thread.funcTable.length,
+      collapsedFuncIndex: profile.shared.funcTable.length,
       implementation: 'cpp' as const,
     };
 
@@ -999,9 +1204,11 @@ describe('"collapse-resource" transform', function () {
         formatTree(selectedThreadSelectors.getCallTree(getState()))
       ).toEqual([
         '- A.js (total: 2, self: —)',
-        '  - firefox (total: 2, self: 1)',
-        '    - F.cpp (total: 1, self: —)',
-        '      - G.js (total: 1, self: 1)',
+        '  - firefox (total: 2, self: —)',
+        '    - E.js (total: 1, self: —)',
+        '      - F.cpp (total: 1, self: —)',
+        '        - G.js (total: 1, self: 1)',
+        '    - I.js (total: 1, self: 1)',
       ]);
     });
 
@@ -1229,7 +1436,8 @@ describe('"collapse-direct-recursion" transform', function () {
         stackTable,
         frameTable,
         funcTable,
-        fileSourceIndex
+        fileSourceIndex,
+        filteredThread.sourceLocationTable
       );
       const lineTimings = getLineTimings(stackLineInfo, samples);
 
@@ -1413,7 +1621,8 @@ describe('"collapse-recursion" transform', function () {
         stackTable,
         frameTable,
         funcTable,
-        fileSourceIndex
+        fileSourceIndex,
+        filteredThread.sourceLocationTable
       );
       const lineTimings = getLineTimings(stackLineInfo, samples);
 
@@ -1526,7 +1735,8 @@ describe('"collapse-recursion" transform', function () {
         stackTable,
         frameTable,
         funcTable,
-        fileSourceIndex
+        fileSourceIndex,
+        filteredThread.sourceLocationTable
       );
       const lineTimings = getLineTimings(stackLineInfo, samples);
 
@@ -1662,7 +1872,8 @@ describe('"collapse-recursion" transform', function () {
         stackTable,
         frameTable,
         funcTable,
-        fileSourceIndex
+        fileSourceIndex,
+        filteredThread.sourceLocationTable
       );
       const lineTimings = getLineTimings(stackLineInfo, samples);
 
@@ -2022,6 +2233,213 @@ describe('"filter-samples" transform', function () {
       dispatch(popTransformsFromStack(0));
     });
   });
+
+  describe('outside-marker filter type', function () {
+    // Same sample layout as the marker-search tests above:
+    //   t=0: A→B→C   t=1: A→B→C→D   t=2: A→C   t=3: A→B→E   t=4: A→F
+    const { profile } = getProfileFromTextSamples(`
+      A  A  A  A  A
+      B  B  C  B  F
+      C  C     E
+         D
+    `);
+    const threadIndex = 0;
+    addMarkersToThreadWithCorrespondingSamples(
+      profile.threads[threadIndex],
+      profile.shared,
+      [
+        [
+          'DOMEvent',
+          0,
+          0.5,
+          { type: 'DOMEvent', latency: 7, eventType: 'click' },
+        ],
+        [
+          'UserTiming',
+          1.5,
+          2.5,
+          { type: 'UserTiming', name: 'measure-2', entryType: 'measure' },
+        ],
+        [
+          'UserTiming',
+          2.5,
+          3.5,
+          { type: 'UserTiming', name: 'measure-2', entryType: 'measure' },
+        ],
+      ]
+    );
+    const { dispatch, getState } = storeWithProfile(profile);
+
+    it('keeps samples outside a single marker range', function () {
+      dispatch(
+        addTransformToStack(threadIndex, {
+          type: 'filter-samples',
+          filterType: 'outside-marker',
+          filter: 'DOMEvent',
+        })
+      );
+      // t=0 is inside DOMEvent (0–0.5); t=1,2,3,4 are kept.
+      const callTree = selectedThreadSelectors.getCallTree(getState());
+      expect(formatTree(callTree)).toEqual([
+        '- A (total: 4, self: —)',
+        '  - B (total: 2, self: —)',
+        '    - C (total: 1, self: —)',
+        '      - D (total: 1, self: 1)',
+        '    - E (total: 1, self: 1)',
+        '  - C (total: 1, self: 1)',
+        '  - F (total: 1, self: 1)',
+      ]);
+      dispatch(popTransformsFromStack(0));
+    });
+
+    it('keeps samples outside multiple marker ranges', function () {
+      dispatch(
+        addTransformToStack(threadIndex, {
+          type: 'filter-samples',
+          filterType: 'outside-marker',
+          filter: 'UserTiming',
+        })
+      );
+      // t=2 and t=3 are inside UserTiming ranges; t=0,1,4 are kept.
+      const callTree = selectedThreadSelectors.getCallTree(getState());
+      expect(formatTree(callTree)).toEqual([
+        '- A (total: 3, self: —)',
+        '  - B (total: 2, self: —)',
+        '    - C (total: 2, self: 1)',
+        '      - D (total: 1, self: 1)',
+        '  - F (total: 1, self: 1)',
+      ]);
+      dispatch(popTransformsFromStack(0));
+    });
+  });
+
+  describe('function-include filter type', function () {
+    const {
+      profile,
+      funcNamesPerThread: [funcNames],
+    } = getProfileFromTextSamples(`
+      A  A  A  A  A
+      B  B  C  B  F
+      C  C     E
+         D
+    `);
+    const threadIndex = 0;
+    const { dispatch, getState } = storeWithProfile(profile);
+
+    it('keeps only samples whose stack contains the specified function', function () {
+      const B = funcNames.indexOf('B');
+      dispatch(
+        addTransformToStack(threadIndex, {
+          type: 'filter-samples',
+          filterType: 'function-include',
+          filter: String(B),
+        })
+      );
+      // t=0 (A→B→C), t=1 (A→B→C→D), t=3 (A→B→E) contain B; t=2 and t=4 do not.
+      const callTree = selectedThreadSelectors.getCallTree(getState());
+      expect(formatTree(callTree)).toEqual([
+        '- A (total: 3, self: —)',
+        '  - B (total: 3, self: —)',
+        '    - C (total: 2, self: 1)',
+        '      - D (total: 1, self: 1)',
+        '    - E (total: 1, self: 1)',
+      ]);
+      dispatch(popTransformsFromStack(0));
+    });
+
+    it('keeps samples containing any of the specified functions', function () {
+      const B = funcNames.indexOf('B');
+      const F = funcNames.indexOf('F');
+      dispatch(
+        addTransformToStack(threadIndex, {
+          type: 'filter-samples',
+          filterType: 'function-include',
+          filter: `${B},${F}`,
+        })
+      );
+      // t=0,1,3 contain B; t=4 contains F; t=2 is dropped.
+      const callTree = selectedThreadSelectors.getCallTree(getState());
+      expect(formatTree(callTree)).toEqual([
+        '- A (total: 4, self: —)',
+        '  - B (total: 3, self: —)',
+        '    - C (total: 2, self: 1)',
+        '      - D (total: 1, self: 1)',
+        '    - E (total: 1, self: 1)',
+        '  - F (total: 1, self: 1)',
+      ]);
+      dispatch(popTransformsFromStack(0));
+    });
+  });
+
+  describe('stack-prefix filter type', function () {
+    const {
+      profile,
+      funcNamesPerThread: [funcNames],
+    } = getProfileFromTextSamples(`
+      A  A  A  A  A
+      B  B  C  B  F
+      C  C     E
+         D
+    `);
+    const threadIndex = 0;
+    const { dispatch, getState } = storeWithProfile(profile);
+
+    it('keeps only samples whose stack starts with the specified prefix', function () {
+      const A = funcNames.indexOf('A');
+      const B = funcNames.indexOf('B');
+      dispatch(
+        addTransformToStack(threadIndex, {
+          type: 'filter-samples',
+          filterType: 'stack-prefix',
+          filter: `${A},${B}`,
+        })
+      );
+      // t=0 (A→B→C), t=1 (A→B→C→D), t=3 (A→B→E) start with A→B; t=2 and t=4 do not.
+      const callTree = selectedThreadSelectors.getCallTree(getState());
+      expect(formatTree(callTree)).toEqual([
+        '- A (total: 3, self: —)',
+        '  - B (total: 3, self: —)',
+        '    - C (total: 2, self: 1)',
+        '      - D (total: 1, self: 1)',
+        '    - E (total: 1, self: 1)',
+      ]);
+      dispatch(popTransformsFromStack(0));
+    });
+  });
+
+  describe('stack-suffix filter type', function () {
+    const {
+      profile,
+      funcNamesPerThread: [funcNames],
+    } = getProfileFromTextSamples(`
+      A  A  A  A  A
+      B  B  C  B  F
+      C  C     E
+         D
+    `);
+    const threadIndex = 0;
+    const { dispatch, getState } = storeWithProfile(profile);
+
+    it('keeps only samples whose leaf frame is the specified function', function () {
+      const C = funcNames.indexOf('C');
+      dispatch(
+        addTransformToStack(threadIndex, {
+          type: 'filter-samples',
+          filterType: 'stack-suffix',
+          filter: String(C),
+        })
+      );
+      // t=0 (A→B→C) and t=2 (A→C) have C as their leaf; the rest do not.
+      const callTree = selectedThreadSelectors.getCallTree(getState());
+      expect(formatTree(callTree)).toEqual([
+        '- A (total: 2, self: —)',
+        '  - B (total: 1, self: —)',
+        '    - C (total: 1, self: 1)',
+        '  - C (total: 1, self: 1)',
+      ]);
+      dispatch(popTransformsFromStack(0));
+    });
+  });
 });
 
 describe('expanded and selected CallNodePaths', function () {
@@ -2164,13 +2582,16 @@ describe('expanded and selected CallNodePaths on inverted trees', function () {
         type: 'focus-subtree',
         callNodePath: [Z, Y],
         implementation: 'combined',
-        inverted: false,
+        inverted: true,
       })
     );
 
     expect(selectedThreadSelectors.getSelectedCallNodePath(getState())).toEqual(
       [Y, X, B]
     );
+    expect(
+      selectedThreadSelectors.getSelectedCallNodeIndex(getState())
+    ).not.toBeNull();
     assertSetContainsOnly(
       selectedThreadSelectors.getExpandedCallNodePaths(getState()),
       [
@@ -2181,22 +2602,24 @@ describe('expanded and selected CallNodePaths on inverted trees', function () {
     );
   });
 
-  it('can update call node references for merging a call node', function () {
+  it('can update call node references for merging a function', function () {
     const { dispatch, getState } = storeWithProfile(profile);
     // This opens expands the call nodes up to this point.
     dispatch(changeInvertCallstack(true));
     dispatch(changeSelectedCallNode(threadIndex, selectedCallNodePath));
     dispatch(
       addTransformToStack(threadIndex, {
-        type: 'merge-call-node',
-        callNodePath: [Z, Y],
-        implementation: 'combined',
+        type: 'merge-function',
+        funcIndex: Y,
       })
     );
 
     expect(selectedThreadSelectors.getSelectedCallNodePath(getState())).toEqual(
       [Z, X, B]
     );
+    expect(
+      selectedThreadSelectors.getSelectedCallNodeIndex(getState())
+    ).not.toBeNull();
     assertSetContainsOnly(
       selectedThreadSelectors.getExpandedCallNodePaths(getState()),
       [
